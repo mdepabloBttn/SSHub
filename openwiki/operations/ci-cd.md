@@ -25,6 +25,8 @@ Trigger: tag push `v*` (created by `just release`).
 
 ## `openwiki-update.yml` — wiki bot
 
+The documentation job is itself part of the repository's delivery surface: changes under `CHANGELOG.md`, source, tests, or `openwiki/` can cause a generated update PR. The changelog coverage notebook is the audit record for release-led documentation, not a replacement for canonical concept pages.
+
 Trigger: `workflow_dispatch` + daily cron `0 8 * * *`. Installs the `openwiki` npm CLI and runs `openwiki code --update --print` (OpenRouter provider, LangSmith tracing), then opens a PR from branch `openwiki/update` via `peter-evans/create-pull-request`. The PR path filter includes the workflow file itself, so bot config edits ride along with doc updates.
 
 ## `strix-pentest.yml` — PR security scan

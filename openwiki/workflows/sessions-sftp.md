@@ -10,7 +10,9 @@ tags: [session, pty, sftp, mosh, workflow, file-transfer]
 
 ## Embedded SSH sessions (`src/session/`)
 
-Connecting to a host spawns `ssh` (or `mosh`) on a pseudo-TTY; output is parsed through `vt100` and rendered fullscreen in ratatui via `tui-term`. Multiple sessions coexist as background tabs — `Ctrl+D` detaches to the dashboard while SSH keeps running. `Alt+S` opens a fuzzy session switcher with host/address and `up` / `new` / `dead` lifecycle indicators; Enter resumes a session, while `Ctrl+Shift+T` creates a local-shell tab using `$SHELL` or `/bin/sh`. The same picker is reused for a new SSH session and the SFTP left-pane host.
+Connecting to a host spawns `ssh` (or `mosh`) on a pseudo-TTY; destinations are built through the shared target-safety guard in `src/ssh/host.rs`, which rejects leading-dash addresses before they can be interpreted as options. This protects both normal connects and aliases without changing ordinary targets.
+
+ output is parsed through `vt100` and rendered fullscreen in ratatui via `tui-term`. Multiple sessions coexist as background tabs — `Ctrl+D` detaches to the dashboard while SSH keeps running. `Alt+S` opens a fuzzy session switcher with host/address and `up` / `new` / `dead` lifecycle indicators; Enter resumes a session, while `Ctrl+Shift+T` creates a local-shell tab using `$SHELL` or `/bin/sh`. The same picker is reused for a new SSH session and the SFTP left-pane host.
 
 The dashboard session strip can be cycled without entering fullscreen; `Ctrl+Shift+S` opens the selected session. Re-entry uses the same slide transition as a fresh connection, with reduced motion bypassing animation.
 

@@ -12,8 +12,8 @@ Beyond the TUI, `sshub` exposes a full scriptable CLI. `src/main.rs` dispatches 
 
 Parsing is hand-rolled (`src/cli/parse.rs`), output DTOs in `src/cli/output.rs`. Conventions:
 
-- `--format plain|json` on listing/show commands (plain default).
-- Exit codes: `0` success, `1` operational failure, `2` usage/bad flags, `124` when `exec --timeout` kills the run. `host connect` and `exec` propagate the child ssh exit code.
+- `--format plain|json` on listing/show commands (plain default). Theme commands are headless and do not bootstrap the TUI or databases; `theme check` validates TOML and `theme show --resolved` emits a reusable resolved document.
+- Exit codes: `0` success, `1` operational failure, `2` usage/bad flags. `host connect` propagates the child ssh exit code.
 - Destructive commands refuse without `--yes`; `sshub db purge` requires `--yes-i-am-stupid`.
 - Unknown positional first arg exits 2 with a hint (avoids launching a full-screen TUI on a typo).
 
@@ -26,6 +26,7 @@ Parsing is hand-rolled (`src/cli/parse.rs`), output DTOs in `src/cli/output.rs`.
 | `group` (alias `groups`) | `list show add edit delete` | Nested groups via parent |
 | `identity` | `list show add edit delete agent-remove` | `add --private-key`, `--password-stdin` for secrets; `agent-remove` = `ssh-add -d` |
 | `tunnel` | `list show create start stop delete` | `start` is detached by default (PID files), `--foreground` runs with keep-alive ([tunnels](tunnels.md)) |
+<!-- openwiki: broken internal link [sessions-sftp.md#sftp] heading anchor "sftp" does not exist in "sessions-sftp.md". Fix the href or restore the target, then delete this comment. -->
 | `sftp` | `ls get put rm mkdir rename chmod` | One-shot over a direct host; no ProxyJump ([sessions & SFTP](sessions-sftp.md#sftp)) |
 | `audit` | `list stats` | `--status ok|fail`, `--days N`, `--via all|connect|tunnel|agent|exec` (`connect` means interactive connects only) |
 | `tags` | — | List all tags |

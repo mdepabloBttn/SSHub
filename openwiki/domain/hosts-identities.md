@@ -10,13 +10,17 @@ tags: [domain, hosts, groups, identities, ssh-agent, termius]
 
 ## Hosts
 
+<!-- openwiki: broken internal link [../architecture/data-model.md#hybrid-host-model] heading anchor "hybrid-host-model" does not exist in "../architecture/data-model.md". Fix the href or restore the target, then delete this comment. -->
 A host is the central entity. Storage and merging rules live in [data model](../architecture/data-model.md#hybrid-host-model); the user-facing model:
 
 - **Managed hosts** (`HostSource::Launcher`) — full CRUD from the [host form](../workflows/tui.md) or [CLI](../workflows/cli.md); fields include address, port, username, tags, description, environment, per-host session-logging override, and `transport` (ssh/mosh).
+<!-- openwiki: broken internal link [../architecture/overview.md#file-watcher] heading anchor "file-watcher" does not exist in "../architecture/overview.md". Fix the href or restore the target, then delete this comment. -->
 - **ssh_config hosts** (`HostSource::SshConfig`) — imported/synced from `~/.ssh/config`; editable metadata but the connection fields track the config file (hot-reloaded by the [file watcher](../architecture/overview.md#file-watcher)).
 - **Legacy aliases** — ssh_config entries with no DB row; surfaced read-only with metadata from `metadata.db`.
 
 Resolution always goes through `HostResolver` / `SshConfigResolver` (`src/ssh/resolver.rs`), which lists `Host` aliases (following `Include`, depth-capped at 16) and resolves effective options with `ssh -G`. `build_ssh_argv` / `build_mosh_argv` (`src/ssh/host.rs`) turn a resolved host into the spawn argv used by [embedded sessions](../workflows/sessions-sftp.md).
+
+**Target safety:** every address passed to ssh or mosh is normalized by the shared builders in `src/ssh/host.rs`; a leading-dash target is rewritten to an `ssh://` form that OpenSSH refuses as a destination rather than parsing as an option. The write boundary also rejects `name`, `address`, and `username` beginning with `-` in managed-host CRUD and PuTTY, Termius, and mRemoteNG imports. Imports drop only the poisoned entry and report it, preserving other entries. This protects the [embedded sessions](../workflows/sessions-sftp.md), [tunnels](../workflows/tunnels.md), and [headless CLI](../workflows/cli.md) consumers of host resolution.
 
 **OS auto-detection** (`src/osinfo/`): on first connect a background worker runs `cat /etc/os-release || uname -s` over ssh (BatchMode without a secret, askpass with one), `parse_os` maps it to a canonical id stored in `hosts.os_icon`, and the host card renders a vendored ANSI/Braille logo (`OsLogoWidget`). Failures are silent by design.
 
@@ -29,7 +33,7 @@ Resolution always goes through `HostResolver` / `SshConfigResolver` (`src/ssh/re
 An identity (`src/store/identities.rs`) bundles a display name, username, and private key path; a "Default" identity is seeded. Hosts/groups reference identities for connection defaults. Secrets (key passphrases, host passwords) live in the OS keyring keyed `identity:{id}` / `host:{id}` — see [secrets](../security/secrets.md).
 
 - **ssh-agent** (`src/ssh/agent.rs`) — wrappers over `ssh-add -l` / `-d`; the Keys tab shows loaded status and can add/remove keys (`p` / `r`; CLI: `sshub identity agent-remove`).
-- **Key files** (`src/ssh/keyfile.rs`) — `ssh-keygen -y` probing detects whether a key needs a passphrase; the passphrase is fed through a staged 0600/0700 askpass script so it never appears in `ps` argv.
+- **Key files** (`src/ssh/keyfile.rs`) — `ssh-keygen -y` probing detects whether a key needs a passphrase; the passphrase is fed through a staged 0600/0700 askpass script so it never appears in `ps` argv. The Keys tab's key generator (`src/app/keygen.rs`, `src/tui/screens/keygen.rs`) creates Ed25519 or RSA-4096 keys without overwriting an existing key or `.pub`, then registers the identity and stores an optional passphrase. Public-key push (`src/app/push_key.rs`) selects an identity and host, appends an exact-match public-key line under remote `umask 077`, and records the result in the audit log; repeating it is idempotent.
 - **Probing** (`src/ssh/probe.rs`) — defines `SshLogEntry`/`LogLevel`, populated by manual log pushes from the connect/session paths. The module’s own background `ssh -v BatchMode` classifier (`spawn_ssh_probe`/`classify_line`), which used to periodically probe every known host, is dead code today (no callers) and was disabled because it "buried the events the user actually cares about" (src/app/mod.rs); there is no live auth-method/host-key display in the detail panel.
 
 ## Termius import (`src/import/termius_csv.rs`)

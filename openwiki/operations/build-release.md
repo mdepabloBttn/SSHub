@@ -8,6 +8,12 @@ tags: [build, release, versioning, just, operations]
 
 # Build, Versioning & Release
 
+## Package distribution
+
+The Rust crate publishes only the `sshub` binary; the `seed-demo` helper is a Cargo example. `npm/build.sh` assembles `sshub-tui` plus platform-specific optional packages for Linux x64, macOS arm64, and macOS x64, wrapping the same prebuilt binary. Other platforms use `cargo install sshub`. `Cargo.toml` excludes demo media, npm sources, and CI files from the crate package. Release builds use thin LTO, one codegen unit, and stripped symbols; this reduces shipped size but means release `RUST_BACKTRACE` output lacks symbols.
+
+Consumer-surface checks: after CLI or theme public API changes, run `cargo test --test cli_commands --test theme_public_api`; after npm or release packaging changes, inspect `npm/build.sh`, `.github/workflows/release.yml`, and run the release workflow or package-specific checks conditionally rather than editing generated package output by hand.
+
 ## Everyday commands
 
 ```bash
@@ -31,6 +37,7 @@ Lint gate (run before **every** push; [CI](ci-cd.md) runs the same): `cargo fmt`
 | `release [minor|patch|X.Y.Z]` | Full release: settle version on `development`, roll CHANGELOG, `--no-ff` merge to `main`, tag `vX.Y.Z`, push, ff `development` |
 | `sync` | Merge `development`→`main` without a release (no tag/bump/changelog) |
 | `setup-hooks` | One-time `git config core.hooksPath .githooks` per checkout |
+<!-- openwiki: broken internal link [../integrations/external-terminals.md#demo-pipeline] heading anchor "demo-pipeline" does not exist in "../integrations/external-terminals.md". Fix the href or restore the target, then delete this comment. -->
 | `record-gifs *tapes` | VHS + ffmpeg demo recording (see [integrations](../integrations/external-terminals.md#demo-pipeline)) |
 | `dry-run` | Headless sanity check |
 

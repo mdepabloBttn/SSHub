@@ -7,7 +7,7 @@ tags: [sshub, tui, ssh, rust, overview]
 
 # SSHub Quickstart
 
-SSHub (`sshub`, v0.9.3 in `Cargo.toml`) is a keyboard-driven terminal UI for managing and connecting to SSH hosts. It merges your read-only `~/.ssh/config` with a fully managed host database (SQLite), and adds embedded in-TUI SSH sessions, an SFTP file browser, SSH tunnels with keep-alive reconnect, ssh-agent identity management, OS auto-detection with logos, and a connection audit log. It also ships a full headless CLI for scripting. License: AGPL-3.0-or-later.
+SSHub (`sshub`, v0.9.3 in `Cargo.toml`) is a keyboard-driven terminal UI for managing and connecting to SSH hosts. It merges your read-only `~/.ssh/config` with a fully managed host database (SQLite), and adds embedded in-TUI SSH sessions, an SFTP file browser, SSH tunnels with keep-alive reconnect, ssh-agent identity management, OS auto-detection with logos, and a connection audit log. It also ships a full headless CLI for scripting. License: AGPL-3.0-or-later from 0.4.0 onward; versions through 0.3.1 remain MIT (`LICENSE`, `CHANGELOG.md`).
 
 - Crate: `sshub` on crates.io (`cargo install sshub`); repo: github.com/Petyok/SSHub
 - Stack: Rust 2021, ratatui 0.30 + crossterm (TUI), portable-pty + vt100/tui-term (embedded sessions), rusqlite bundled (SQLite), ssh2/libssh2 with vendored OpenSSL (SFTP), nucleo (fuzzy search), notify (file watcher), keyring (OS secret store). **No async runtime** — a synchronous event loop polls every 50 ms (`src/lib.rs`).
@@ -51,6 +51,29 @@ mode without profile discovery. Legacy top-level data migrates into
 
 ### Workflows
 - [TUI dashboard](workflows/tui.md) — tabs, overlays, keybindings, searchable pickers, and screens.
+- [Runtime themes](workflows/themes.md) — TOML themes, semantic roles, gradients, PTY ground, picker persistence, and `sshub theme` validation.
+```mermaid
+flowchart LR
+    intent["Change intent"] --> route["Quickstart routing table"]
+    route --> source["Owning source and symbols"]
+    source --> test["Focused test"]
+    test --> validate["Minimal validation"]
+```
+
+This routing loop keeps internal correctness separate from consumer-facing and release-surface checks.
+
+| Change area or user intent | Relevant wiki page | Exact source entry points | Important symbols or types | Focused tests | Minimal validation command |
+|---|---|---|---|---|---|
+| Add or change a runtime theme or theme field | [Runtime themes](workflows/themes.md) | `src/theme/parse.rs`, `src/theme/resolve.rs`, `src/app/theme_picker.rs`, `src/cli/theme.rs` | `Theme`, `ResolvedTheme`, `ThemeManager` | `tests/smoke/theme_public_api.rs`, `tests/e2e/theme_picker.rs` | `cargo test --test theme_public_api --test e2e -- theme` |
+| Change profiles, config persistence, or migration | [Data model & storage](architecture/data-model.md) | `src/profile/mod.rs`, `src/profile/picker.rs`, `src/profile/migrate.rs`, `src/config.rs` | `ProfilePaths`, profile picker, `save_config` | `tests/e2e/first_run.rs`, `tests/e2e/config_reload.rs`, `tests/smoke/config_load.rs` | `cargo test --test config_load --test e2e -- first_run config_reload` |
+| Change host CRUD, imports, resolution, or target safety | [Hosts, groups & identities](domain/hosts-identities.md) | `src/store/hosts.rs`, `src/ssh/resolver.rs`, `src/ssh/host.rs`, `src/import/` | `HostResolver`, `SshConfigResolver`, `build_ssh_argv` | `tests/e2e/host_crud.rs`, `tests/e2e/hybrid_compat.rs`, `tests/smoke/resolver.rs` | `cargo test --test resolver --test e2e -- host_crud hybrid_compat` |
+| Change embedded sessions, clipboard relay, or SFTP | [Sessions & SFTP](workflows/sessions-sftp.md) | `src/session/`, `src/osc52.rs`, `src/sftp/`, `src/app/sftp.rs` | `Session`, `PtyRuntime`, `SftpTransport`, `SftpEvent` | `src/app/tests/session.rs`, `src/app/tests/sftp.rs`, `tests/e2e/quick_connect.rs` | `cargo test --test e2e -- quick_connect` |
+| Change CLI commands or shipped public exports | [Headless CLI](workflows/cli.md) and [Build & release](operations/build-release.md) | `src/cli/mod.rs`, `src/cli/`, `src/lib.rs`, `man/sshub.1`, `npm/` | `CliContext`, command runners, public theme exports | `tests/smoke/cli_commands.rs`, `tests/smoke/theme_public_api.rs` | `cargo test --test cli_commands --test theme_public_api` |
+| Change security, credentials, or known-host handling | [Secrets](security/secrets.md) and [Known hosts](workflows/known-hosts.md) | `src/credentials.rs`, `src/session/askpass.rs`, `src/known_hosts.rs`, `src/secure_fs.rs` | `PasswordStore`, `OsKeyring`, askpass staging, TOFU policy | `tests/e2e/keychain.rs`, known-host tests under `src/` | `cargo test --test e2e -- keychain` |
+| Change release automation or package distribution | [Build & release](operations/build-release.md) and [CI](operations/ci-cd.md) | `Justfile`, `.github/workflows/release.yml`, `Cargo.toml`, `npm/build.sh` | release profile, `just release`, package targets | CI workflow and smoke tests | `cargo fmt --check && cargo clippy --all-targets` |
+
+### Workflows continued
+
 - [Known hosts manager](workflows/known-hosts.md) — fingerprints, guarded known_hosts deletion, and first-connect verification.
 - [Sessions & SFTP](workflows/sessions-sftp.md) — embedded PTY sessions, OSC 52 relay boundary, askpass, session logging, mosh, and the dual-pane SFTP browser.
 - [Tunnels](workflows/tunnels.md) — local/remote/dynamic tunnels and keep-alive reconnect with backoff.
@@ -76,5 +99,5 @@ Pinned workflow: [docs/implementation-flow.md](../docs/implementation-flow.md) (
 
 - **Demo pipeline details** (`demo/` tapes, `record.sh`, `seed-demo.sh`) — only summarized under [integrations](integrations/external-terminals.md); deferred because it is contributor tooling, not product behavior.
 - **Host-sync design** (`docs/host-sync-design.md`) — P2P sync design for epic #13; not yet implemented, documented only in the design doc.
-- **Changelog audit follow-ups** — public-key push/key generation, npm packaging details, motion/panel behavior, PuTTY/mRemoteNG import, and release-license history remain pending in [the changelog coverage notebook](changelog-coverage.md).
+- **Changelog audit follow-ups** — minor historical regression details remain grouped under canonical workflow pages; the entry-by-entry status is tracked in [the changelog coverage notebook](changelog-coverage.md).
 - **Detached tunnel PID-file hardening** (`src/tunnel/spawn.rs`) — acknowledged races (no locking, recycled PIDs) noted in [tunnels](workflows/tunnels.md); behavior may change.
