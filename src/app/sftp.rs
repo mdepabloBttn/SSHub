@@ -1477,9 +1477,9 @@ impl App {
     /// worker thread self-terminate.
     ///
     /// In-flight transfers and a live editor stay blocked. A retry-phase (or
-    /// idle) remote edit owns a working copy that may already contain edits:
-    /// Esc asks before discarding it. A local in-place edit is independent of
-    /// the workers and is left alone.
+    /// idle) remote edit owns a working copy that may already contain edits,
+    /// and a failed local edit still owns its retry: Esc asks before
+    /// discarding either.
     fn sftp_disconnect(&mut self) {
         if self.remote_edit_blocks_or_confirms_disconnect() {
             return;
@@ -1493,14 +1493,15 @@ impl App {
         self.sftp_teardown();
     }
 
-    /// `true` when disconnect must not proceed (blocked or waiting on confirm).
+    /// `true` when disconnect must not proceed (blocked or waiting on
+    /// confirm). Local in-place edits follow the same rules as remote ones:
+    /// nothing worker-owned is at stake, but a failed edit still deserves a
+    /// discard prompt instead of a silent teardown that strands its retry.
     fn remote_edit_blocks_or_confirms_disconnect(&mut self) -> bool {
         let Some(edit) = self.file_edit.as_ref() else {
             return false;
         };
-        if edit.source == EditSource::Local {
-            return false;
-        }
+        let is_local = edit.source == EditSource::Local;
         match (edit.phase, edit.editor_session) {
             (FileEditPhase::Downloading | FileEditPhase::Uploading, _) => {
                 if let Some(s) = self.sftp.as_mut() {
@@ -1528,22 +1529,22 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "file".into());
-                self.pending_delete = Some(PendingDelete::RemoteEdit { name });
+                self.pending_delete = Some(PendingDelete::RemoteEdit {
+                    name,
+                    local: is_local,
+                });
                 self.mode = AppMode::ConfirmDelete;
                 true
             }
         }
     }
 
-    /// Drop the SFTP session and any remote-edit working copy.
+    /// Drop the SFTP session and any pending edit state: a remote edit's
+    /// working copy, or a local edit's retry (the local file itself keeps
+    /// whatever the last editor run wrote to it).
     pub(crate) fn sftp_teardown(&mut self) {
-        if self
-            .file_edit
-            .as_ref()
-            .is_some_and(|e| e.source != EditSource::Local)
-        {
-            self.host_notice = Some("remote edit discarded".into());
-            self.file_edit = None;
+        if self.file_edit.take().is_some() {
+            self.host_notice = Some("pending edit discarded".into());
         }
         // Mirror the way in (#35): a handshake that never completed carries the
         // "connecting…" layer off to the right, a live browser parts its panes

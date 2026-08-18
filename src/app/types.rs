@@ -787,10 +787,12 @@ pub enum PendingDelete {
         name: String,
         is_dir: bool,
     },
-    /// Discard a remote-edit working copy and disconnect the SFTP session.
-    /// Used when Esc would otherwise drop already-edited content.
+    /// Discard a pending file edit and disconnect the SFTP session. Used
+    /// when Esc would otherwise drop already-edited content (remote edit)
+    /// or strand a dead editor retry (local in-place edit).
     RemoteEdit {
         name: String,
+        local: bool,
     },
 }
 

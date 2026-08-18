@@ -611,7 +611,7 @@ fn confirming_discard_drops_the_retrying_upload() {
 
     assert!(app.sftp.is_none(), "confirmed discard disconnects");
     assert!(app.file_edit.is_none(), "confirmed discard drops the copy");
-    assert_eq!(app.host_notice.as_deref(), Some("remote edit discarded"));
+    assert_eq!(app.host_notice.as_deref(), Some("pending edit discarded"));
     assert_eq!(app.mode, AppMode::Normal);
 }
 
@@ -629,6 +629,89 @@ fn cancelling_discard_keeps_the_retrying_upload() {
     );
     assert_eq!(app.mode, AppMode::Normal);
     assert!(app.pending_delete.is_none());
+}
+
+fn app_with_local_edit(phase: FileEditPhase, editor_session: Option<usize>) -> App {
+    use crate::sftp::model::SftpState;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    app.active_tab = 1;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let local_path = temp_dir.path().join("notes.txt");
+    std::fs::write(&local_path, "local content").unwrap();
+    app.file_edit = Some(FileEditState {
+        source: EditSource::Local,
+        source_path: local_path.clone(),
+        local_path,
+        temp_dir: None,
+        remote_mode: None,
+        stamp: None,
+        phase,
+        editor_session,
+    });
+    app
+}
+
+/// A failed local in-place edit used to have no discard route even though
+/// the failure notice promised "Esc to discard (asks first)": for
+/// `EditSource::Local`, Esc tore the SFTP session down and left a stale
+/// `file_edit` that made the next `e` retry the dead editor instead of
+/// editing the newly selected file.
+#[test]
+fn esc_on_a_failed_local_edit_asks_before_discarding() {
+    let mut app = app_with_local_edit(FileEditPhase::RetryingEditor, None);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+
+    assert!(app.sftp.is_some(), "Esc must ask, not disconnect outright");
+    assert!(app.file_edit.is_some(), "the pending edit survives Esc");
+    assert_eq!(app.mode, AppMode::ConfirmDelete);
+}
+
+#[test]
+fn confirming_discard_drops_the_local_edit_and_disconnects() {
+    let mut app = app_with_local_edit(FileEditPhase::RetryingEditor, None);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    app.handle_key(key_char('y')).unwrap();
+
+    assert!(app.sftp.is_none(), "confirmed discard disconnects");
+    assert!(app.file_edit.is_none(), "no stale local edit survives");
+    assert_eq!(app.host_notice.as_deref(), Some("pending edit discarded"));
+    assert_eq!(app.mode, AppMode::Normal);
+}
+
+#[test]
+fn cancelling_discard_keeps_the_local_edit() {
+    let mut app = app_with_local_edit(FileEditPhase::RetryingEditor, None);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+
+    assert!(app.sftp.is_some(), "cancel keeps the session");
+    assert!(app.file_edit.is_some(), "cancel keeps the pending edit");
+    assert_eq!(app.mode, AppMode::Normal);
+    assert!(app.pending_delete.is_none());
+}
+
+/// A live editor PTY must not be orphaned by a disconnect: `tick_file_edit`
+/// walks `file_edit` to find it, so tearing the session down underneath an
+/// open editor would strand the tab.
+#[test]
+fn disconnect_waits_for_a_live_local_editor_session() {
+    let mut app = app_with_local_edit(FileEditPhase::Editing, Some(0));
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+
+    assert!(app.sftp.is_some(), "a live editor session blocks Esc");
+    assert!(app.file_edit.is_some());
+    assert_ne!(app.mode, AppMode::ConfirmDelete);
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_deref())
+        .is_some_and(|notice| notice.contains("finish the local editor")));
 }
 
 /// The SFTP progress bar sweeps toward the worker's chunked figure (#35),

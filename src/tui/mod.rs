@@ -1907,8 +1907,14 @@ fn render_confirm_delete_popup(frame: &mut Frame, app: &App) {
                 format!("Delete '{name}'?")
             }
         }
-        Some(PendingDelete::RemoteEdit { name }) => {
-            format!("Discard remote edit of '{name}'? Unsaved changes will be lost.")
+        Some(PendingDelete::RemoteEdit { name, local }) => {
+            if *local {
+                // The file keeps its on-disk content; what is lost is the
+                // retry and the SFTP session it belonged to.
+                format!("Discard pending edit of '{name}'? This disconnects SFTP.")
+            } else {
+                format!("Discard remote edit of '{name}'? Unsaved changes will be lost.")
+            }
         }
         None => "Delete?".to_string(),
     };
@@ -6646,11 +6652,26 @@ primary = \"#c20001\"\n";
         let mut app = test_app_with_hosts();
         app.pending_delete = Some(crate::app::PendingDelete::RemoteEdit {
             name: "notes.txt".into(),
+            local: false,
         });
         app.mode = AppMode::ConfirmDelete;
         let buf = render_to_buffer(&app, 120, 38);
         let _ = crate::test_support::find_text(&buf, "Discard remote edit of 'notes.txt'?");
         let _ = crate::test_support::find_text(&buf, "y: discard");
+    }
+
+    #[test]
+    fn confirm_local_edit_discard_warns_about_disconnect_not_data_loss() {
+        let mut app = test_app_with_hosts();
+        app.pending_delete = Some(crate::app::PendingDelete::RemoteEdit {
+            name: "notes.txt".into(),
+            local: true,
+        });
+        app.mode = AppMode::ConfirmDelete;
+        let buf = render_to_buffer(&app, 120, 38);
+        let _ = crate::test_support::find_text(&buf, "Discard pending edit of 'notes.txt'?");
+        // The line wraps inside the 54-column popup; the tail lands on its own row.
+        let _ = crate::test_support::find_text(&buf, "disconnects SFTP.");
     }
 
     // ── Release measurement: gradient rendering cost ────────────────

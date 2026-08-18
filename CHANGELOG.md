@@ -12,6 +12,15 @@ All notable changes to SSHub are documented in this file.
   "remote edit discarded" toast. In-flight transfers still block; retry
   phases now ask before discarding.
 
+- **A failed local in-place edit no longer strands its retry** - the failure
+  notice promised "Esc to discard (asks first)" for every edit source, but a
+  local edit had no discard route: `Esc` disconnected the SFTP session and
+  left a stale edit behind, so the next `e` retried the dead editor instead
+  of editing the newly selected file. Local edits now follow the same rules
+  as remote ones: a live editor blocks disconnect, a failed edit asks before
+  discarding (the confirm names the disconnect, not data loss), and the
+  teardown toast reads "pending edit discarded".
+
 - **SFTP connections for imported SSH-config hosts lost their authentication** -
   the native SFTP transport now resolves the configured username and identity
   file instead of using only the cached address and port.
