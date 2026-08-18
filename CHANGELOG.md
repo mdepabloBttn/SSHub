@@ -12,6 +12,10 @@ All notable changes to SSHub are documented in this file.
   "remote edit discarded" toast. In-flight transfers still block; retry
   phases now ask before discarding.
 
+- **SFTP connections for imported SSH-config hosts lost their authentication** -
+  the native SFTP transport now resolves the configured username and identity
+  file instead of using only the cached address and port.
+
 ### Added
 
 - **Local editing from the SFTP browser** - press `e` on a regular file in any

@@ -973,10 +973,18 @@ impl App {
     /// Spawn the worker for a specific host entry and enter the browser. Refuses
     /// ProxyJump hosts (unsupported by the libssh2 transport in v1) with a
     /// notice instead of a doomed connection attempt.
+    pub(crate) fn sftp_ssh_host(&self, entry: &HostEntry) -> Result<SshHost> {
+        resolve_sftp_ssh_host(entry, self.resolver.as_ref())
+    }
+
     fn sftp_connect_to(&mut self, entry: HostEntry) -> Result<()> {
-        let ssh_host = match &entry {
-            HostEntry::Managed(m) => managed_to_ssh_host(m),
-            HostEntry::Legacy { host, .. } => host.clone(),
+        let ssh_host = match self.sftp_ssh_host(&entry) {
+            Ok(host) => host,
+            Err(e) => {
+                self.notice_popup = Some(format!("SFTP connection failed:\n{e:#}"));
+                self.mode = AppMode::Notice;
+                return Ok(());
+            }
         };
 
         if ssh_host.proxy_jump.is_some() {
@@ -1088,9 +1096,13 @@ impl App {
             }
             return Ok(());
         }
-        let ssh_host = match &entry {
-            HostEntry::Managed(m) => managed_to_ssh_host(m),
-            HostEntry::Legacy { host, .. } => host.clone(),
+        let ssh_host = match self.sftp_ssh_host(&entry) {
+            Ok(host) => host,
+            Err(e) => {
+                self.notice_popup = Some(format!("SFTP connection failed:\n{e:#}"));
+                self.mode = AppMode::Notice;
+                return Ok(());
+            }
         };
         if ssh_host.proxy_jump.is_some() {
             self.host_notice =
