@@ -328,9 +328,10 @@ fn run_terminal_loop(
         }
 
         // A local editor is an embedded PTY session too. Once it exits, return
-        // to the SFTP browser and let the guarded upload flow continue without
-        // requiring an extra keypress on the frozen terminal screen.
-        app.tick_remote_edit();
+        // to the SFTP browser and finish the edit (upload a remote working
+        // copy, or refresh after an in-place local save) without requiring an
+        // extra keypress on the frozen terminal screen.
+        app.tick_file_edit();
 
         // Every session's PTY was drained above, but only the one on screen may
         // put an OSC 52 write on the host clipboard; the rest is dropped now

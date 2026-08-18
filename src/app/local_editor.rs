@@ -97,10 +97,10 @@ pub(crate) fn local_editor_argv(command: &str, path: &Path) -> Result<Vec<String
 impl App {
     /// Open the local editor for the already downloaded working copy.
     pub(crate) fn start_local_editor(&mut self) -> Result<()> {
-        let Some((path, name)) = self.remote_edit.as_ref().and_then(|edit| {
+        let Some((path, name)) = self.file_edit.as_ref().and_then(|edit| {
             matches!(
                 edit.phase,
-                RemoteEditPhase::Editing | RemoteEditPhase::RetryingEditor
+                FileEditPhase::Editing | FileEditPhase::RetryingEditor
             )
             .then(|| {
                 (
@@ -139,21 +139,18 @@ impl App {
             return Ok(());
         }
 
-        if let Some(edit) = self.remote_edit.as_mut() {
-            edit.phase = RemoteEditPhase::Editing;
+        if let Some(edit) = self.file_edit.as_mut() {
+            edit.phase = FileEditPhase::Editing;
             edit.editor_session = Some(self.sessions.len() - 1);
         }
         Ok(())
     }
 
     /// Detect the local editor's PTY exit independently of which session tab is
-    /// visible. A successful editor exit starts the guarded remote upload.
-    pub(crate) fn tick_remote_edit(&mut self) {
-        let Some(idx) = self
-            .remote_edit
-            .as_ref()
-            .and_then(|edit| edit.editor_session)
-        else {
+    /// visible. A successful exit uploads a remote working copy, or just
+    /// refreshes the panes after an in-place local edit.
+    pub(crate) fn tick_file_edit(&mut self) {
+        let Some(idx) = self.file_edit.as_ref().and_then(|edit| edit.editor_session) else {
             return;
         };
         let Some(status) = self
@@ -168,7 +165,7 @@ impl App {
         };
 
         let editor_was_visible = self.active_session == Some(idx) && self.session_is_rendered();
-        if let Some(edit) = self.remote_edit.as_mut() {
+        if let Some(edit) = self.file_edit.as_mut() {
             edit.editor_session = None;
         }
         if self.active_session == Some(idx) {
@@ -188,7 +185,7 @@ impl App {
 
         if status == "success" {
             if self
-                .remote_edit
+                .file_edit
                 .as_ref()
                 .is_some_and(|edit| edit.source == EditSource::Local)
             {
@@ -205,7 +202,7 @@ impl App {
     /// working copy to upload, so the state is dropped and the panes are
     /// refreshed so size/mtime changes show up.
     pub(crate) fn local_edit_finished(&mut self) {
-        self.remote_edit = None;
+        self.file_edit = None;
         if let Some(s) = self.sftp.as_mut() {
             // A queue may have been started while the editor was open: don't
             // clobber its phase, or the next `c` would re-dispatch transfers
@@ -220,8 +217,8 @@ impl App {
     }
 
     pub(crate) fn remote_edit_editor_failed(&mut self, message: String) {
-        if let Some(edit) = self.remote_edit.as_mut() {
-            edit.phase = RemoteEditPhase::RetryingEditor;
+        if let Some(edit) = self.file_edit.as_mut() {
+            edit.phase = FileEditPhase::RetryingEditor;
             edit.editor_session = None;
         }
         if let Some(s) = self.sftp.as_mut() {

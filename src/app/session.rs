@@ -290,12 +290,12 @@ impl App {
             return;
         };
         let cancelled_editor = self
-            .remote_edit
+            .file_edit
             .as_ref()
             .is_some_and(|edit| edit.editor_session == Some(idx));
         if idx < self.sessions.len() {
             if cancelled_editor {
-                if let Some(edit) = self.remote_edit.as_mut() {
+                if let Some(edit) = self.file_edit.as_mut() {
                     edit.editor_session = None;
                 }
             }
@@ -330,7 +330,7 @@ impl App {
             // Session::drop kills the child + joins the reader thread.
             self.sessions.remove(idx);
             if !cancelled_editor {
-                if let Some(edit) = self.remote_edit.as_mut() {
+                if let Some(edit) = self.file_edit.as_mut() {
                     if let Some(editor_idx) = edit.editor_session {
                         if editor_idx > idx {
                             edit.editor_session = Some(editor_idx - 1);
@@ -437,7 +437,7 @@ impl App {
     pub fn shutdown_all(&mut self) {
         self.sessions.clear();
         self.active_session = None;
-        self.remote_edit = None;
+        self.file_edit = None;
     }
 
     /// Copy the SSH log entries for the selected host to the system clipboard

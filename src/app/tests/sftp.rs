@@ -60,11 +60,11 @@ fn edit_key_starts_a_remote_download_for_the_right_pane() {
                 && local.file_name().is_some_and(|name| name == "notes.txt")
     ));
     assert!(matches!(
-        app.remote_edit.as_ref().map(|edit| edit.phase),
-        Some(RemoteEditPhase::Downloading)
+        app.file_edit.as_ref().map(|edit| edit.phase),
+        Some(FileEditPhase::Downloading)
     ));
     assert!(matches!(
-        app.remote_edit.as_ref().map(|edit| edit.source),
+        app.file_edit.as_ref().map(|edit| edit.source),
         Some(EditSource::RightRemote)
     ));
 }
@@ -101,13 +101,13 @@ fn edit_key_starts_a_local_edit_in_place_for_the_local_pane() {
 
         // No worker involved: the file is edited in place.
         assert!(rx.try_recv().is_err());
-        let edit = app.remote_edit.as_ref().expect("local edit started");
+        let edit = app.file_edit.as_ref().expect("local edit started");
         assert_eq!(edit.source, EditSource::Local);
         assert_eq!(edit.local_path, file);
         assert!(edit.temp_dir.is_none());
         // The bogus $VISUAL never spawns a session: the editor start fails and
         // the edit waits for a retry instead of downloading anything.
-        assert_eq!(edit.phase, RemoteEditPhase::RetryingEditor);
+        assert_eq!(edit.phase, FileEditPhase::RetryingEditor);
         assert!(app
             .sftp
             .as_ref()
@@ -148,10 +148,8 @@ fn edit_key_routes_the_download_to_the_second_worker() {
                 && local.file_name().is_some_and(|name| name == "notes.txt")
     ));
     assert!(matches!(
-        app.remote_edit
-            .as_ref()
-            .map(|edit| (edit.source, edit.phase)),
-        Some((EditSource::LeftRemote, RemoteEditPhase::Downloading))
+        app.file_edit.as_ref().map(|edit| (edit.source, edit.phase)),
+        Some((EditSource::LeftRemote, FileEditPhase::Downloading))
     ));
 }
 
@@ -163,14 +161,14 @@ fn switching_the_left_pane_waits_for_a_second_server_edit() {
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::LeftRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::Downloading,
+        phase: FileEditPhase::Downloading,
         editor_session: None,
     });
     let (tx, _rx) = std::sync::mpsc::channel::<crate::sftp::SftpCommand>();
@@ -182,10 +180,7 @@ fn switching_the_left_pane_waits_for_a_second_server_edit() {
         app.sftp_tx2.is_some(),
         "switching the left pane must wait for the edit transfer"
     );
-    assert!(
-        app.remote_edit.is_some(),
-        "the working copy must be retained"
-    );
+    assert!(app.file_edit.is_some(), "the working copy must be retained");
     assert!(app
         .sftp
         .as_ref()
@@ -204,14 +199,14 @@ fn switching_the_left_pane_waits_for_a_second_server_edit_retry() {
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::LeftRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::RetryingEditor,
+        phase: FileEditPhase::RetryingEditor,
         editor_session: None,
     });
     let (tx, _rx) = std::sync::mpsc::channel::<crate::sftp::SftpCommand>();
@@ -220,7 +215,7 @@ fn switching_the_left_pane_waits_for_a_second_server_edit_retry() {
     app.sftp_left_pane_to_local();
 
     assert!(app.sftp_tx2.is_some(), "retry-phase edits lock the pane");
-    assert!(app.remote_edit.is_some());
+    assert!(app.file_edit.is_some());
     assert!(app
         .sftp
         .as_ref()
@@ -229,7 +224,7 @@ fn switching_the_left_pane_waits_for_a_second_server_edit_retry() {
 }
 
 /// The right-hand worker must not apply edit events that belong to the
-/// second-server (left) pane. The two workers share one `remote_edit`.
+/// second-server (left) pane. The two workers share one `file_edit`.
 #[test]
 fn right_worker_ignores_edit_events_for_a_left_pane_edit() {
     use crate::sftp::model::SftpState;
@@ -237,22 +232,22 @@ fn right_worker_ignores_edit_events_for_a_left_pane_edit() {
     let mut app = test_app(vec![]);
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::LeftRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::Downloading,
+        phase: FileEditPhase::Downloading,
         editor_session: None,
     });
 
     app.apply_sftp_event(crate::sftp::SftpEvent::EditError("right worker".into()));
 
     assert_eq!(
-        app.remote_edit.as_ref().map(|edit| edit.phase),
-        Some(RemoteEditPhase::Downloading)
+        app.file_edit.as_ref().map(|edit| edit.phase),
+        Some(FileEditPhase::Downloading)
     );
     assert!(app
         .sftp
@@ -268,22 +263,22 @@ fn left_worker_applies_edit_events_for_a_left_pane_edit() {
     let mut app = test_app(vec![]);
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::LeftRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::Downloading,
+        phase: FileEditPhase::Downloading,
         editor_session: None,
     });
 
     app.apply_sftp_event_left(crate::sftp::SftpEvent::EditError("left worker".into()));
 
     assert_eq!(
-        app.remote_edit.as_ref().map(|edit| edit.phase),
-        Some(RemoteEditPhase::RetryingDownload)
+        app.file_edit.as_ref().map(|edit| edit.phase),
+        Some(FileEditPhase::RetryingDownload)
     );
     assert!(app
         .sftp
@@ -293,7 +288,7 @@ fn left_worker_applies_edit_events_for_a_left_pane_edit() {
 }
 
 /// The left-hand worker must not apply edit events that belong to the
-/// connected (right) server. The two workers share one `remote_edit`.
+/// connected (right) server. The two workers share one `file_edit`.
 #[test]
 fn left_worker_ignores_edit_events_for_a_right_pane_edit() {
     use crate::sftp::model::{Phase, SftpState};
@@ -302,9 +297,9 @@ fn left_worker_ignores_edit_events_for_a_right_pane_edit() {
     let mut app = test_app(vec![]);
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::RightRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
@@ -313,19 +308,19 @@ fn left_worker_ignores_edit_events_for_a_right_pane_edit() {
             mtime: None,
             is_regular: true,
         }),
-        phase: RemoteEditPhase::Uploading,
+        phase: FileEditPhase::Uploading,
         editor_session: None,
     });
 
     app.apply_sftp_event_left(crate::sftp::SftpEvent::EditUploaded(None));
 
     assert!(
-        app.remote_edit.is_some(),
+        app.file_edit.is_some(),
         "wrong worker must not finish the edit"
     );
     assert_eq!(
-        app.remote_edit.as_ref().map(|edit| edit.phase),
-        Some(RemoteEditPhase::Uploading)
+        app.file_edit.as_ref().map(|edit| edit.phase),
+        Some(FileEditPhase::Uploading)
     );
     assert_eq!(
         app.sftp.as_ref().map(|state| state.phase),
@@ -341,9 +336,9 @@ fn right_worker_applies_edit_events_for_a_right_pane_edit() {
     let mut app = test_app(vec![]);
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::RightRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
@@ -352,13 +347,13 @@ fn right_worker_applies_edit_events_for_a_right_pane_edit() {
             mtime: None,
             is_regular: true,
         }),
-        phase: RemoteEditPhase::Uploading,
+        phase: FileEditPhase::Uploading,
         editor_session: None,
     });
 
     app.apply_sftp_event(crate::sftp::SftpEvent::EditUploaded(None));
 
-    assert!(app.remote_edit.is_none());
+    assert!(app.file_edit.is_none());
     assert!(app
         .sftp
         .as_ref()
@@ -373,20 +368,20 @@ fn local_edit_finish_clears_state_without_an_upload() {
     let mut app = test_app(vec![]);
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::Local,
-        remote_path: "/tmp/notes.txt".into(),
+        source_path: "/tmp/notes.txt".into(),
         local_path: "/tmp/notes.txt".into(),
         temp_dir: None,
         remote_mode: None,
         stamp: None,
-        phase: RemoteEditPhase::Editing,
+        phase: FileEditPhase::Editing,
         editor_session: None,
     });
 
     app.local_edit_finished();
 
-    assert!(app.remote_edit.is_none());
+    assert!(app.file_edit.is_none());
     assert!(app
         .sftp
         .as_ref()
@@ -402,14 +397,14 @@ fn disconnect_waits_for_an_active_edit_transfer() {
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::RightRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::Downloading,
+        phase: FileEditPhase::Downloading,
         editor_session: None,
     });
 
@@ -419,10 +414,7 @@ fn disconnect_waits_for_an_active_edit_transfer() {
         app.sftp.is_some(),
         "the active transfer must not be detached"
     );
-    assert!(
-        app.remote_edit.is_some(),
-        "the working copy must be retained"
-    );
+    assert!(app.file_edit.is_some(), "the working copy must be retained");
     assert!(app
         .sftp
         .as_ref()
@@ -430,7 +422,7 @@ fn disconnect_waits_for_an_active_edit_transfer() {
         .is_some_and(|notice| notice.contains("wait for the edit transfer")));
 }
 
-fn app_with_retry_edit(phase: RemoteEditPhase) -> App {
+fn app_with_retry_edit(phase: FileEditPhase) -> App {
     use crate::sftp::model::SftpState;
     use crate::sftp::transport::RemoteFileStamp;
 
@@ -442,16 +434,16 @@ fn app_with_retry_edit(phase: RemoteEditPhase) -> App {
     std::fs::write(&local_path, "already edited").unwrap();
     let stamp = matches!(
         phase,
-        RemoteEditPhase::Uploading | RemoteEditPhase::RetryingUpload
+        FileEditPhase::Uploading | FileEditPhase::RetryingUpload
     )
     .then_some(RemoteFileStamp {
         size: 14,
         mtime: Some(1),
         is_regular: true,
     });
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::RightRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path,
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
@@ -467,7 +459,7 @@ fn app_with_retry_edit(phase: RemoteEditPhase) -> App {
 /// discarded". The file had already been edited.
 #[test]
 fn disconnect_does_not_silently_discard_a_retrying_upload() {
-    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingUpload);
+    let mut app = app_with_retry_edit(FileEditPhase::RetryingUpload);
 
     app.handle_key(key(KeyCode::Esc)).unwrap();
 
@@ -476,7 +468,7 @@ fn disconnect_does_not_silently_discard_a_retrying_upload() {
         "Esc must not tear the session down over an unsaved edit"
     );
     assert!(
-        app.remote_edit.is_some(),
+        app.file_edit.is_some(),
         "the edited working copy must be retained"
     );
     assert_ne!(
@@ -491,7 +483,7 @@ fn disconnect_does_not_silently_discard_a_retrying_upload() {
 /// and dropped the in-progress edit so `e` could never retry.
 #[test]
 fn disconnect_does_not_silently_discard_a_retrying_download() {
-    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingDownload);
+    let mut app = app_with_retry_edit(FileEditPhase::RetryingDownload);
 
     app.handle_key(key(KeyCode::Esc)).unwrap();
 
@@ -500,7 +492,7 @@ fn disconnect_does_not_silently_discard_a_retrying_download() {
         "Esc must not detach a retryable download"
     );
     assert!(
-        app.remote_edit.is_some(),
+        app.file_edit.is_some(),
         "the in-progress edit must be retained"
     );
     assert_ne!(app.host_notice.as_deref(), Some("remote edit discarded"));
@@ -509,14 +501,14 @@ fn disconnect_does_not_silently_discard_a_retrying_download() {
 
 #[test]
 fn confirming_discard_drops_the_retrying_upload() {
-    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingUpload);
+    let mut app = app_with_retry_edit(FileEditPhase::RetryingUpload);
 
     app.handle_key(key(KeyCode::Esc)).unwrap();
     app.handle_key(key_char('y')).unwrap();
 
     assert!(app.sftp.is_none(), "confirmed discard disconnects");
     assert!(
-        app.remote_edit.is_none(),
+        app.file_edit.is_none(),
         "confirmed discard drops the copy"
     );
     assert_eq!(app.host_notice.as_deref(), Some("remote edit discarded"));
@@ -525,14 +517,14 @@ fn confirming_discard_drops_the_retrying_upload() {
 
 #[test]
 fn cancelling_discard_keeps_the_retrying_upload() {
-    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingUpload);
+    let mut app = app_with_retry_edit(FileEditPhase::RetryingUpload);
 
     app.handle_key(key(KeyCode::Esc)).unwrap();
     app.handle_key(key(KeyCode::Esc)).unwrap();
 
     assert!(app.sftp.is_some(), "cancel keeps the session");
     assert!(
-        app.remote_edit.is_some(),
+        app.file_edit.is_some(),
         "cancel keeps the edited working copy"
     );
     assert_eq!(app.mode, AppMode::Normal);
