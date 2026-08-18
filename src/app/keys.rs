@@ -949,6 +949,10 @@ impl App {
                     self.sftp_delete_confirmed(side, path, is_dir);
                     self.mode = AppMode::Normal;
                 }
+                Some(PendingDelete::RemoteEdit { .. }) => {
+                    self.sftp_teardown();
+                    self.mode = AppMode::Normal;
+                }
                 None => {
                     self.mode = AppMode::Normal;
                 }

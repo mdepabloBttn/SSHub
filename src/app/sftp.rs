@@ -1465,28 +1465,68 @@ impl App {
 
     /// Tear down the live session. Dropping the command `Sender` makes the
     /// worker thread self-terminate.
+    ///
+    /// In-flight transfers and a live editor stay blocked. A retry-phase (or
+    /// idle) remote edit owns a working copy that may already contain edits:
+    /// Esc asks before discarding it. A local in-place edit is independent of
+    /// the workers and is left alone.
     fn sftp_disconnect(&mut self) {
-        if let Some(edit) = self.remote_edit.as_ref() {
-            // A local edit is independent of the SFTP workers: disconnecting
-            // the browser neither strands nor discards it.
-            if edit.source != EditSource::Local {
-                let message = match edit.phase {
-                    RemoteEditPhase::Downloading | RemoteEditPhase::Uploading => {
-                        Some("wait for the edit transfer to finish before disconnecting SFTP")
-                    }
-                    RemoteEditPhase::Editing if edit.editor_session.is_some() => {
-                        Some("finish the local editor before disconnecting SFTP")
-                    }
-                    _ => None,
-                };
-                if let Some(message) = message {
-                    if let Some(s) = self.sftp.as_mut() {
-                        s.notice = Some(message.into());
-                    }
-                    return;
+        if self.remote_edit_blocks_or_confirms_disconnect() {
+            return;
+        }
+        self.sftp_teardown();
+    }
+
+    /// Handshake never completed: drop the session without a discard prompt.
+    /// A remote edit cannot exist here — the browser never came up.
+    fn sftp_force_disconnect(&mut self) {
+        self.sftp_teardown();
+    }
+
+    /// `true` when disconnect must not proceed (blocked or waiting on confirm).
+    fn remote_edit_blocks_or_confirms_disconnect(&mut self) -> bool {
+        let Some(edit) = self.remote_edit.as_ref() else {
+            return false;
+        };
+        if edit.source == EditSource::Local {
+            return false;
+        }
+        match (edit.phase, edit.editor_session) {
+            (RemoteEditPhase::Downloading | RemoteEditPhase::Uploading, _) => {
+                if let Some(s) = self.sftp.as_mut() {
+                    s.notice = Some(
+                        "wait for the edit transfer to finish before disconnecting SFTP".into(),
+                    );
                 }
+                true
+            }
+            (RemoteEditPhase::Editing, Some(_)) => {
+                if let Some(s) = self.sftp.as_mut() {
+                    s.notice = Some("finish the local editor before disconnecting SFTP".into());
+                }
+                true
+            }
+            (
+                RemoteEditPhase::RetryingDownload
+                | RemoteEditPhase::RetryingUpload
+                | RemoteEditPhase::RetryingEditor
+                | RemoteEditPhase::Editing,
+                _,
+            ) => {
+                let name = edit
+                    .remote_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".into());
+                self.pending_delete = Some(PendingDelete::RemoteEdit { name });
+                self.mode = AppMode::ConfirmDelete;
+                true
             }
         }
+    }
+
+    /// Drop the SFTP session and any remote-edit working copy.
+    pub(crate) fn sftp_teardown(&mut self) {
         if self
             .remote_edit
             .as_ref()
@@ -1636,7 +1676,7 @@ impl App {
             }
             SftpEvent::ConnectFailed(msg) => {
                 let host = self.sftp_host.clone().unwrap_or_default();
-                self.sftp_disconnect();
+                self.sftp_force_disconnect();
                 // Surface the failure as a modal popup instead of silently
                 // reverting to the picker — an unreachable host is loud, not blank.
                 self.notice_popup = Some(if host.is_empty() {

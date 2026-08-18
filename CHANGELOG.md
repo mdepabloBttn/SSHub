@@ -4,6 +4,14 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Esc in the SFTP browser no longer silently discards an unsaved remote
+  edit** - a failed download or upload left the edit in a retry phase that
+  `Esc` treated as abandonable. That dropped the working copy with only a
+  "remote edit discarded" toast. In-flight transfers still block; retry
+  phases now ask before discarding.
+
 ### Added
 
 - **Local editing from the SFTP browser** - press `e` on a regular file in any
