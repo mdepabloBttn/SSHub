@@ -227,7 +227,9 @@ impl App {
         if let Some(s) = self.sftp.as_mut() {
             s.phase = crate::sftp::model::Phase::Browsing;
             s.progress = None;
-            s.notice = Some(format!("{message} — press e to retry or Esc to discard"));
+            s.notice = Some(format!(
+                "{message} — press e to retry or Esc to discard (asks first)"
+            ));
         }
     }
 }

@@ -486,7 +486,7 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     },
     HelpItem::Entry {
         key: "Esc",
-        desc: "Disconnect · back to picker",
+        desc: "Disconnect · back to picker (asks before discarding an unsaved edit)",
     },
     HelpItem::Entry { key: "", desc: "" },
     HelpItem::Entry {

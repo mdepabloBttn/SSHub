@@ -785,6 +785,11 @@ pub enum PendingDelete {
         name: String,
         is_dir: bool,
     },
+    /// Discard a remote-edit working copy and disconnect the SFTP session.
+    /// Used when Esc would otherwise drop already-edited content.
+    RemoteEdit {
+        name: String,
+    },
 }
 
 /// Editable metadata field index in [`AppMode::HostDetail`].

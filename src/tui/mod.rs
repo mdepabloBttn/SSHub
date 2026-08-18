@@ -1907,8 +1907,12 @@ fn render_confirm_delete_popup(frame: &mut Frame, app: &App) {
                 format!("Delete '{name}'?")
             }
         }
+        Some(PendingDelete::RemoteEdit { name }) => {
+            format!("Discard remote edit of '{name}'? Unsaved changes will be lost.")
+        }
         None => "Delete?".to_string(),
     };
+    let discard_edit = matches!(app.pending_delete, Some(PendingDelete::RemoteEdit { .. }));
     let area = frame.area();
     let popup_width = 54u16.min(area.width);
     // Wrap the message (a host name can be long) and size the box to fit.
@@ -1919,10 +1923,15 @@ fn render_confirm_delete_popup(frame: &mut Frame, app: &App) {
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
+    let hint = if discard_edit {
+        "y: discard    Esc: cancel"
+    } else {
+        "y: delete    Esc: cancel"
+    };
     let lines = vec![
         ratatui::text::Line::from(message),
         ratatui::text::Line::from(""),
-        ratatui::text::Line::from("y: delete    Esc: cancel"),
+        ratatui::text::Line::from(hint),
     ];
 
     let popup_area = crate::tui::popup_open_rect(popup_area, app);
@@ -6630,6 +6639,18 @@ primary = \"#c20001\"\n";
             warning_fg,
             "its question is components.popup.warning too"
         );
+    }
+
+    #[test]
+    fn confirm_remote_edit_discard_names_the_file() {
+        let mut app = test_app_with_hosts();
+        app.pending_delete = Some(crate::app::PendingDelete::RemoteEdit {
+            name: "notes.txt".into(),
+        });
+        app.mode = AppMode::ConfirmDelete;
+        let buf = render_to_buffer(&app, 120, 38);
+        let _ = crate::test_support::find_text(&buf, "Discard remote edit of 'notes.txt'?");
+        let _ = crate::test_support::find_text(&buf, "y: discard");
     }
 
     // ── Release measurement: gradient rendering cost ────────────────

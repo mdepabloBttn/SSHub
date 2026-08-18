@@ -430,6 +430,115 @@ fn disconnect_waits_for_an_active_edit_transfer() {
         .is_some_and(|notice| notice.contains("wait for the edit transfer")));
 }
 
+fn app_with_retry_edit(phase: RemoteEditPhase) -> App {
+    use crate::sftp::model::SftpState;
+    use crate::sftp::transport::RemoteFileStamp;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    app.active_tab = 1;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let local_path = temp_dir.path().join("notes.txt");
+    std::fs::write(&local_path, "already edited").unwrap();
+    let stamp = matches!(
+        phase,
+        RemoteEditPhase::Uploading | RemoteEditPhase::RetryingUpload
+    )
+    .then_some(RemoteFileStamp {
+        size: 14,
+        mtime: Some(1),
+        is_regular: true,
+    });
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::RightRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path,
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp,
+        phase,
+        editor_session: None,
+    });
+    app
+}
+
+/// Esc on a failed upload used to fall through `_ => None` in
+/// `sftp_disconnect`, drop the working copy, and toast "remote edit
+/// discarded". The file had already been edited.
+#[test]
+fn disconnect_does_not_silently_discard_a_retrying_upload() {
+    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingUpload);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+
+    assert!(
+        app.sftp.is_some(),
+        "Esc must not tear the session down over an unsaved edit"
+    );
+    assert!(
+        app.remote_edit.is_some(),
+        "the edited working copy must be retained"
+    );
+    assert_ne!(
+        app.host_notice.as_deref(),
+        Some("remote edit discarded"),
+        "discarding an edited file must not be a silent toast"
+    );
+    assert_eq!(app.mode, AppMode::ConfirmDelete);
+}
+
+/// Same hole as the upload retry: a failed download also hit `_ => None`
+/// and dropped the in-progress edit so `e` could never retry.
+#[test]
+fn disconnect_does_not_silently_discard_a_retrying_download() {
+    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingDownload);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+
+    assert!(
+        app.sftp.is_some(),
+        "Esc must not detach a retryable download"
+    );
+    assert!(
+        app.remote_edit.is_some(),
+        "the in-progress edit must be retained"
+    );
+    assert_ne!(app.host_notice.as_deref(), Some("remote edit discarded"));
+    assert_eq!(app.mode, AppMode::ConfirmDelete);
+}
+
+#[test]
+fn confirming_discard_drops_the_retrying_upload() {
+    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingUpload);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    app.handle_key(key_char('y')).unwrap();
+
+    assert!(app.sftp.is_none(), "confirmed discard disconnects");
+    assert!(
+        app.remote_edit.is_none(),
+        "confirmed discard drops the copy"
+    );
+    assert_eq!(app.host_notice.as_deref(), Some("remote edit discarded"));
+    assert_eq!(app.mode, AppMode::Normal);
+}
+
+#[test]
+fn cancelling_discard_keeps_the_retrying_upload() {
+    let mut app = app_with_retry_edit(RemoteEditPhase::RetryingUpload);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+
+    assert!(app.sftp.is_some(), "cancel keeps the session");
+    assert!(
+        app.remote_edit.is_some(),
+        "cancel keeps the edited working copy"
+    );
+    assert_eq!(app.mode, AppMode::Normal);
+    assert!(app.pending_delete.is_none());
+}
+
 /// The SFTP progress bar sweeps toward the worker's chunked figure (#35),
 /// settles on it, and resets outright when the queue moves to the next file.
 #[test]
