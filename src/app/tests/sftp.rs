@@ -228,6 +228,144 @@ fn switching_the_left_pane_waits_for_a_second_server_edit_retry() {
         .is_some_and(|notice| notice.contains("finish or discard the edit")));
 }
 
+/// The right-hand worker must not apply edit events that belong to the
+/// second-server (left) pane. The two workers share one `remote_edit`.
+#[test]
+fn right_worker_ignores_edit_events_for_a_left_pane_edit() {
+    use crate::sftp::model::SftpState;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    let temp_dir = tempfile::tempdir().unwrap();
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::LeftRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path: temp_dir.path().join("notes.txt"),
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp: None,
+        phase: RemoteEditPhase::Downloading,
+        editor_session: None,
+    });
+
+    app.apply_sftp_event(crate::sftp::SftpEvent::EditError("right worker".into()));
+
+    assert_eq!(
+        app.remote_edit.as_ref().map(|edit| edit.phase),
+        Some(RemoteEditPhase::Downloading)
+    );
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_ref())
+        .is_none());
+}
+
+#[test]
+fn left_worker_applies_edit_events_for_a_left_pane_edit() {
+    use crate::sftp::model::SftpState;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    let temp_dir = tempfile::tempdir().unwrap();
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::LeftRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path: temp_dir.path().join("notes.txt"),
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp: None,
+        phase: RemoteEditPhase::Downloading,
+        editor_session: None,
+    });
+
+    app.apply_sftp_event_left(crate::sftp::SftpEvent::EditError("left worker".into()));
+
+    assert_eq!(
+        app.remote_edit.as_ref().map(|edit| edit.phase),
+        Some(RemoteEditPhase::RetryingDownload)
+    );
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_deref())
+        .is_some_and(|notice| notice.contains("left worker")));
+}
+
+/// The left-hand worker must not apply edit events that belong to the
+/// connected (right) server. The two workers share one `remote_edit`.
+#[test]
+fn left_worker_ignores_edit_events_for_a_right_pane_edit() {
+    use crate::sftp::model::{Phase, SftpState};
+    use crate::sftp::transport::RemoteFileStamp;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    let temp_dir = tempfile::tempdir().unwrap();
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::RightRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path: temp_dir.path().join("notes.txt"),
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp: Some(RemoteFileStamp {
+            size: 12,
+            mtime: None,
+            is_regular: true,
+        }),
+        phase: RemoteEditPhase::Uploading,
+        editor_session: None,
+    });
+
+    app.apply_sftp_event_left(crate::sftp::SftpEvent::EditUploaded(None));
+
+    assert!(
+        app.remote_edit.is_some(),
+        "wrong worker must not finish the edit"
+    );
+    assert_eq!(
+        app.remote_edit.as_ref().map(|edit| edit.phase),
+        Some(RemoteEditPhase::Uploading)
+    );
+    assert_eq!(
+        app.sftp.as_ref().map(|state| state.phase),
+        Some(Phase::Browsing)
+    );
+}
+
+#[test]
+fn right_worker_applies_edit_events_for_a_right_pane_edit() {
+    use crate::sftp::model::SftpState;
+    use crate::sftp::transport::RemoteFileStamp;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    let temp_dir = tempfile::tempdir().unwrap();
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::RightRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path: temp_dir.path().join("notes.txt"),
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp: Some(RemoteFileStamp {
+            size: 12,
+            mtime: None,
+            is_regular: true,
+        }),
+        phase: RemoteEditPhase::Uploading,
+        editor_session: None,
+    });
+
+    app.apply_sftp_event(crate::sftp::SftpEvent::EditUploaded(None));
+
+    assert!(app.remote_edit.is_none());
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_deref())
+        .is_some_and(|notice| notice.contains("remote file updated")));
+}
+
 #[test]
 fn local_edit_finish_clears_state_without_an_upload() {
     use crate::sftp::model::SftpState;

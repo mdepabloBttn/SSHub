@@ -1518,11 +1518,54 @@ impl App {
         self.sftp_rx2 = None;
     }
 
+    /// Fold an edit-lifecycle event into `remote_edit` when it belongs to
+    /// `expected`. Two workers can emit these; the other pane's events must
+    /// not steal the in-progress edit.
+    ///
+    /// Returns `None` when `ev` was an edit event (applied or ignored).
+    fn take_sftp_edit_event(
+        &mut self,
+        ev: crate::sftp::SftpEvent,
+        expected: EditSource,
+    ) -> Option<crate::sftp::SftpEvent> {
+        use crate::sftp::SftpEvent;
+
+        let belongs = self
+            .remote_edit
+            .as_ref()
+            .is_some_and(|e| e.source == expected);
+        match ev {
+            SftpEvent::EditDownloaded(stamp) => {
+                if belongs {
+                    self.remote_edit_downloaded(stamp);
+                }
+                None
+            }
+            SftpEvent::EditUploaded(warning) => {
+                if belongs {
+                    self.remote_edit_uploaded(warning);
+                }
+                None
+            }
+            SftpEvent::EditError(msg) => {
+                if belongs {
+                    self.remote_edit_error(msg);
+                }
+                None
+            }
+            other => Some(other),
+        }
+    }
+
     /// Apply one [`SftpEvent`] from the *left* pane's worker (the second
     /// server). The worker speaks in its own terms -- everything it reports is
     /// `Side::Remote` -- so its listings are folded into the left pane here.
     pub fn apply_sftp_event_left(&mut self, ev: crate::sftp::SftpEvent) {
         use crate::sftp::SftpEvent;
+
+        let Some(ev) = self.take_sftp_edit_event(ev, EditSource::LeftRemote) else {
+            return;
+        };
 
         match ev {
             SftpEvent::Connected => {
@@ -1549,30 +1592,7 @@ impl App {
                     s.local.set_entries(entries);
                 }
             }
-            SftpEvent::EditDownloaded(stamp)
-                if self
-                    .remote_edit
-                    .as_ref()
-                    .is_some_and(|e| e.source == EditSource::LeftRemote) =>
-            {
-                self.remote_edit_downloaded(stamp)
-            }
-            SftpEvent::EditUploaded(warning)
-                if self
-                    .remote_edit
-                    .as_ref()
-                    .is_some_and(|e| e.source == EditSource::LeftRemote) =>
-            {
-                self.remote_edit_uploaded(warning)
-            }
-            SftpEvent::EditError(msg)
-                if self
-                    .remote_edit
-                    .as_ref()
-                    .is_some_and(|e| e.source == EditSource::LeftRemote) =>
-            {
-                self.remote_edit_error(msg)
-            }
+            // Kept for exhaustiveness; take_sftp_edit_event already consumed these.
             SftpEvent::EditDownloaded(_) | SftpEvent::EditUploaded(_) | SftpEvent::EditError(_) => {
             }
             SftpEvent::OpDone => self.sftp_refresh_panes(),
@@ -1622,6 +1642,10 @@ impl App {
         use crate::sftp::model::Progress;
         use crate::sftp::SftpEvent;
 
+        let Some(ev) = self.take_sftp_edit_event(ev, EditSource::RightRemote) else {
+            return;
+        };
+
         match ev {
             SftpEvent::Connected => {
                 let was_connecting = self.sftp.as_ref().is_some_and(|s| s.connecting);
@@ -1660,30 +1684,7 @@ impl App {
                     }
                 }
             }
-            SftpEvent::EditDownloaded(stamp)
-                if self
-                    .remote_edit
-                    .as_ref()
-                    .is_some_and(|e| e.source == EditSource::RightRemote) =>
-            {
-                self.remote_edit_downloaded(stamp)
-            }
-            SftpEvent::EditUploaded(warning)
-                if self
-                    .remote_edit
-                    .as_ref()
-                    .is_some_and(|e| e.source == EditSource::RightRemote) =>
-            {
-                self.remote_edit_uploaded(warning)
-            }
-            SftpEvent::EditError(msg)
-                if self
-                    .remote_edit
-                    .as_ref()
-                    .is_some_and(|e| e.source == EditSource::RightRemote) =>
-            {
-                self.remote_edit_error(msg)
-            }
+            // Kept for exhaustiveness; take_sftp_edit_event already consumed these.
             SftpEvent::EditDownloaded(_) | SftpEvent::EditUploaded(_) | SftpEvent::EditError(_) => {
             }
             SftpEvent::Progress {
