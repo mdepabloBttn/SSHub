@@ -34,6 +34,18 @@ All notable changes to SSHub are documented in this file.
   and refuse to overwrite a file whose size or modification time changed
   before the upload; local files are edited in place.
 
+## [0.15.0] - 2026-08-18
+
+### Added
+
+- **`cargo install sshub --no-default-features` links the system OpenSSL** -
+  the vendored OpenSSL that keeps a default `cargo install` self-contained is
+  now the `vendored` feature rather than a hard dependency edge, so anyone who
+  already has OpenSSL — distro packagers above all, who must link the system
+  library and patch it on a CVE without rebuilding SSHub — can opt out. It
+  stays on by default, so nothing changes for a plain install except that the
+  choice now exists; opting out also drops most of a cold build's wall clock.
+
 - **`sshub exec <host> -- <command>`** (issue #85) - run one command on a saved
   host from a script and get its output and exit code back, instead of
   reassembling the ssh command line by hand and losing the stored identity,
@@ -53,6 +65,23 @@ All notable changes to SSHub are documented in this file.
   which can carry a secret in an argument. Session transcripts are skipped —
   `script(1)` wrapping fights the redirection exec exists for — and mosh hosts
   are refused, having no one-shot command mode.
+
+### Fixed
+
+- **Shift+P on the hosts tab did nothing until Identities had been visited
+  once** - `App::identities` is filled lazily, only by the Keys tab, the host
+  form and the group form. Before any of those, push-key read an empty cache,
+  concluded there were no key identities and returned; a trip to Identities and
+  back "fixed" it, which reads as a haunted keybind. It now reloads the
+  identities itself, so the picker opens on the first press of a fresh start.
+
+- **Dashboard notices were invisible unless a panel was zoomed** - `host_notice`
+  had exactly one surface left after the status bar was removed (#58), and that
+  toast was gated on `panel_zoomed`. Push-key errors, import/export results and
+  SFTP failures were all set and then never drawn, so every refused action
+  looked like a dead key. The toast now renders zoomed or not. Two silent
+  push-key bail-outs also gained a message: a group header has no key target,
+  and an empty Keys selection has no identity to push.
 
 ## [0.14.2] - 2026-08-12
 
