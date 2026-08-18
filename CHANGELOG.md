@@ -6,6 +6,13 @@ All notable changes to SSHub are documented in this file.
 
 ### Added
 
+- **Local editing from the SFTP browser** - press `e` on a regular file in any
+  pane (the connected server, the second server, or the local filesystem) to
+  open it in `$VISUAL` or `$EDITOR`. Remote files use a private working copy
+  that successful editor exits upload through the existing safe transfer path
+  and refuse to overwrite a file whose size or modification time changed
+  before the upload; local files are edited in place.
+
 - **`sshub exec <host> -- <command>`** (issue #85) - run one command on a saved
   host from a script and get its output and exit code back, instead of
   reassembling the ssh command line by hand and losing the stored identity,

@@ -13,7 +13,7 @@ use std::thread;
 use anyhow::{Context, Result};
 
 use super::model::{QueuedTransfer, Side};
-use super::transport::{SftpTransport, Ssh2Transport};
+use super::transport::{RemoteFileStamp, SftpTransport, Ssh2Transport};
 use crate::session::PendingSecret;
 use crate::ssh::agent::AgentInfo;
 use crate::ssh::SshHost;
@@ -26,6 +26,18 @@ pub enum SftpCommand {
     /// List a directory. Only the `Remote` side is serviced here; the UI reads
     /// the local filesystem itself via `std::fs`.
     ListDir(Side, PathBuf),
+    /// Download one remote file for local editing. Unlike a queued transfer,
+    /// this has an explicit completion event so the UI can start the editor
+    /// without guessing which queue operation finished.
+    EditDownload { remote: PathBuf, local: PathBuf },
+    /// Upload a locally edited file after checking that the remote file still
+    /// has the stamp captured before editing.
+    EditUpload {
+        local: PathBuf,
+        remote: PathBuf,
+        expected: RemoteFileStamp,
+        mode: Option<u32>,
+    },
     /// Run the given transfers in order.
     RunQueue(Vec<QueuedTransfer>),
     /// Delete a remote path (recursively if `is_dir`).
@@ -49,6 +61,8 @@ pub enum SftpEvent {
     ConnectFailed(String),
     /// A directory listing completed.
     DirListing(Side, PathBuf, Vec<super::model::FileEntry>),
+    /// The edit working copy is ready and carries the original remote stamp.
+    EditDownloaded(RemoteFileStamp),
     /// Progress for the transfer at `index` of `total`.
     Progress {
         index: usize,
@@ -63,6 +77,13 @@ pub enum SftpEvent {
     /// A remote file operation (remove/mkdir/rename) succeeded; the UI should
     /// refresh its panes.
     OpDone,
+    /// The edited working copy was uploaded. The optional message reports a
+    /// best-effort failure to restore the original permission bits.
+    EditUploaded(Option<String>),
+    /// An explicit failure from one of the edit commands. Keeping this separate
+    /// from generic SFTP errors prevents an older listing error from being
+    /// attributed to the edit currently visible in the UI.
+    EditError(String),
     /// A recoverable error for the last command (listing/transfer/op).
     Error(String),
 }
@@ -111,6 +132,93 @@ fn worker_loop(
                 let evt = match transport.list_dir(&path) {
                     Ok(entries) => SftpEvent::DirListing(side, path, entries),
                     Err(e) => SftpEvent::Error(format!("{e:#}")),
+                };
+                if evt_tx.send(evt).is_err() {
+                    return;
+                }
+            }
+            SftpCommand::EditDownload { remote, local } => {
+                let mut delivery_failed = false;
+                let result: Result<RemoteFileStamp> = (|| {
+                    let stamp = transport.file_stamp(&remote)?;
+                    transport.download(&remote, &local, &mut |transferred, size| {
+                        if evt_tx
+                            .send(SftpEvent::Progress {
+                                index: 0,
+                                total: 1,
+                                transferred,
+                                size,
+                            })
+                            .is_err()
+                        {
+                            delivery_failed = true;
+                        }
+                    })?;
+                    Ok(stamp)
+                })();
+                if delivery_failed {
+                    return;
+                }
+                let evt = match result {
+                    Ok(stamp) => SftpEvent::EditDownloaded(stamp),
+                    Err(e) => {
+                        SftpEvent::EditError(format!("edit download {}: {e:#}", remote.display()))
+                    }
+                };
+                if evt_tx.send(evt).is_err() {
+                    return;
+                }
+            }
+            SftpCommand::EditUpload {
+                local,
+                remote,
+                expected,
+                mode,
+            } => {
+                let mut delivery_failed = false;
+                let result: Result<Option<String>> = (|| {
+                    let current = transport.file_stamp(&remote)?;
+                    if current != expected {
+                        anyhow::bail!(
+                            "remote file changed while it was being edited (size {} -> {}, mtime {:?} -> {:?})",
+                            expected.size,
+                            current.size,
+                            expected.mtime,
+                            current.mtime
+                        );
+                    }
+                    transport.upload(&local, &remote, &mut |transferred, size| {
+                        if evt_tx
+                            .send(SftpEvent::Progress {
+                                index: 0,
+                                total: 1,
+                                transferred,
+                                size,
+                            })
+                            .is_err()
+                        {
+                            delivery_failed = true;
+                        }
+                    })?;
+                    let mut mode_warning = None;
+                    if let Some(mode) = mode {
+                        if let Err(e) = transport.chmod(&remote, mode) {
+                            mode_warning = Some(format!(
+                                "could not restore permissions to {:o}: {e:#}",
+                                mode
+                            ));
+                        }
+                    }
+                    Ok(mode_warning)
+                })();
+                if delivery_failed {
+                    return;
+                }
+                let evt = match result {
+                    Ok(warning) => SftpEvent::EditUploaded(warning),
+                    Err(e) => {
+                        SftpEvent::EditError(format!("edit upload {}: {e:#}", remote.display()))
+                    }
                 };
                 if evt_tx.send(evt).is_err() {
                     return;
@@ -946,6 +1054,85 @@ mod tests {
                 OpCall::Remove(PathBuf::from("/srv/old"), true),
             ]
         );
+    }
+
+    #[test]
+    fn edit_download_emits_the_original_remote_stamp() {
+        let mut t = MockTransport::new(42).with_stat("/srv/a.txt", false, 42);
+        let events = drive(
+            &mut t,
+            vec![SftpCommand::EditDownload {
+                remote: PathBuf::from("/srv/a.txt"),
+                local: PathBuf::from("/tmp/edit/a.txt"),
+            }],
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SftpEvent::EditDownloaded(RemoteFileStamp {
+                size: 42,
+                mtime: None,
+                is_regular: true
+            })
+        )));
+        assert_eq!(
+            t.calls_handle().lock().unwrap().as_slice(),
+            &[TransferCall {
+                direction: Direction::Download,
+                src: PathBuf::from("/srv/a.txt"),
+                dst: PathBuf::from("/tmp/edit/a.txt"),
+            }]
+        );
+    }
+
+    #[test]
+    fn edit_upload_checks_stamp_and_restores_mode() {
+        let mut t = MockTransport::new(42).with_stat("/srv/a.txt", false, 42);
+        let events = drive(
+            &mut t,
+            vec![SftpCommand::EditUpload {
+                local: PathBuf::from("/tmp/edit/a.txt"),
+                remote: PathBuf::from("/srv/a.txt"),
+                expected: RemoteFileStamp {
+                    size: 42,
+                    mtime: None,
+                    is_regular: true,
+                },
+                mode: Some(0o755),
+            }],
+        );
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SftpEvent::EditUploaded(None))));
+        assert!(t
+            .ops_handle()
+            .lock()
+            .unwrap()
+            .contains(&OpCall::Chmod(PathBuf::from("/srv/a.txt"), 0o755)));
+    }
+
+    #[test]
+    fn edit_upload_refuses_a_changed_remote_file() {
+        let mut t = MockTransport::new(42).with_stat("/srv/a.txt", false, 99);
+        let events = drive(
+            &mut t,
+            vec![SftpCommand::EditUpload {
+                local: PathBuf::from("/tmp/edit/a.txt"),
+                remote: PathBuf::from("/srv/a.txt"),
+                expected: RemoteFileStamp {
+                    size: 42,
+                    mtime: None,
+                    is_regular: true,
+                },
+                mode: None,
+            }],
+        );
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SftpEvent::EditError(_))));
+        assert!(t.calls_handle().lock().unwrap().is_empty());
     }
 
     #[test]

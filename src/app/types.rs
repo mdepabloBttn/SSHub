@@ -423,6 +423,46 @@ pub enum AppMode {
     KnownHosts,
 }
 
+/// Where an in-progress edit lives: which pane owns the file and which
+/// SFTP worker (if any) serves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditSource {
+    /// Right-hand pane on the connected server (`sftp_tx`).
+    RightRemote,
+    /// Left-hand pane on the second server (`sftp_tx2`).
+    LeftRemote,
+    /// Left-hand pane on the local filesystem: no worker involved.
+    Local,
+}
+
+/// Local-editor synchronization phase for a file selected in an SFTP pane or
+/// the local pane. The temporary directory owns the working copy (when the
+/// source is remote) until the upload has either completed or the user
+/// abandons the edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteEditPhase {
+    Downloading,
+    RetryingDownload,
+    Editing,
+    RetryingEditor,
+    Uploading,
+    RetryingUpload,
+}
+
+pub struct RemoteEditState {
+    pub source: EditSource,
+    pub remote_path: std::path::PathBuf,
+    pub local_path: std::path::PathBuf,
+    /// Working copy for remote sources; `None` for plain local files, which
+    /// are edited in place.
+    pub temp_dir: Option<tempfile::TempDir>,
+    pub remote_mode: Option<u32>,
+    pub stamp: Option<crate::sftp::transport::RemoteFileStamp>,
+    pub phase: RemoteEditPhase,
+    /// Index of the embedded local-editor session while it is alive.
+    pub editor_session: Option<usize>,
+}
+
 /// Live background-run state; App holds `broadcast: Option<BroadcastState>`.
 ///
 /// No derive attribute at all — not even `Debug` — because

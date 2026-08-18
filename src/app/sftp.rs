@@ -241,6 +241,11 @@ impl App {
             return Ok(());
         }
 
+        if self.is_action(KeyAction::Edit, &key) {
+            self.sftp_edit_selected();
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Tab => {
                 if let Some(s) = self.sftp.as_mut() {
@@ -303,6 +308,282 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Start editing the selected file. A remote file (right-hand pane or
+    /// second server in the left pane) is downloaded to a private local temp
+    /// directory and uploaded back when the editor closes; a plain local file
+    /// is edited in place. The worker owns both SFTP transfers so the UI never
+    /// blocks.
+    fn sftp_edit_selected(&mut self) {
+        if let Some(edit) = self.remote_edit.as_ref() {
+            match edit.phase {
+                RemoteEditPhase::RetryingDownload => self.remote_edit_start_download(),
+                RemoteEditPhase::RetryingEditor => {
+                    let _ = self.start_local_editor();
+                }
+                RemoteEditPhase::RetryingUpload => self.remote_edit_start_upload(),
+                RemoteEditPhase::Downloading
+                | RemoteEditPhase::Editing
+                | RemoteEditPhase::Uploading => {
+                    if let Some(s) = self.sftp.as_mut() {
+                        s.notice = Some("an edit is already in progress".into());
+                    }
+                }
+            }
+            return;
+        }
+
+        let Some((source, remote_path, name, remote_mode)) = self.sftp.as_ref().and_then(|s| {
+            if s.phase == Phase::Running || s.connecting || s.left_connecting {
+                return None;
+            }
+            if !s.queue.is_empty() {
+                return None;
+            }
+            let side = s.focused_side();
+            let entry = match side {
+                Side::Remote => s.remote.selected_entry(),
+                Side::Local => s.local.selected_entry(),
+            }?;
+            if entry.is_parent() || entry.is_dir || entry.is_symlink {
+                return None;
+            }
+            let source = match side {
+                Side::Remote => EditSource::RightRemote,
+                Side::Local if s.left_is_remote() => EditSource::LeftRemote,
+                Side::Local => EditSource::Local,
+            };
+            let pane_path = match side {
+                Side::Remote => &s.remote.cwd,
+                Side::Local => &s.local.cwd,
+            };
+            Some((
+                source,
+                pane_path.join(&entry.name),
+                entry.name.clone(),
+                entry.perm,
+            ))
+        }) else {
+            if let Some(s) = self.sftp.as_mut() {
+                if s.phase == Phase::Running || s.connecting {
+                    s.notice = Some("wait for the current SFTP operation to finish".into());
+                } else if !s.queue.is_empty() {
+                    s.notice = Some("run or clear the queued transfers first".into());
+                } else {
+                    let target = match s.focused_side() {
+                        Side::Remote => "remote",
+                        Side::Local if s.left_is_remote() => "remote (second server)",
+                        Side::Local => "local",
+                    };
+                    s.notice = Some(format!("select a regular {target} file to edit"));
+                }
+            }
+            return;
+        };
+
+        // Plain local file: edit in place, no worker involved.
+        if source == EditSource::Local {
+            self.remote_edit = Some(RemoteEditState {
+                source,
+                remote_path: remote_path.clone(),
+                local_path: remote_path,
+                temp_dir: None,
+                remote_mode: None,
+                stamp: None,
+                phase: RemoteEditPhase::Editing,
+                editor_session: None,
+            });
+            let _ = self.start_local_editor();
+            return;
+        }
+
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("sshub-edit-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let temp_dir = match builder.tempdir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                if let Some(s) = self.sftp.as_mut() {
+                    s.notice = Some(format!("could not create edit workspace: {e}"));
+                }
+                return;
+            }
+        };
+        let local_path = temp_dir.path().join(&name);
+        let sent = self
+            .sftp_edit_channel(source)
+            .map(|tx| {
+                tx.send(SftpCommand::EditDownload {
+                    remote: remote_path.clone(),
+                    local: local_path.clone(),
+                })
+                .is_ok()
+            })
+            .unwrap_or(false);
+        if !sent {
+            if let Some(s) = self.sftp.as_mut() {
+                s.notice = Some("SFTP is not connected — edit not started".into());
+            }
+            return;
+        }
+
+        self.remote_edit = Some(RemoteEditState {
+            source,
+            remote_path,
+            local_path,
+            temp_dir: Some(temp_dir),
+            remote_mode,
+            stamp: None,
+            phase: RemoteEditPhase::Downloading,
+            editor_session: None,
+        });
+        if let Some(s) = self.sftp.as_mut() {
+            s.phase = Phase::Running;
+            s.progress = None;
+            s.notice = Some(format!("downloading {name} for local editing"));
+        }
+    }
+
+    /// The SFTP worker that serves an in-progress edit, if any.
+    fn sftp_edit_channel(
+        &self,
+        source: EditSource,
+    ) -> Option<&std::sync::mpsc::Sender<SftpCommand>> {
+        match source {
+            EditSource::RightRemote => self.sftp_tx.as_ref(),
+            EditSource::LeftRemote => self.sftp_tx2.as_ref(),
+            EditSource::Local => None,
+        }
+    }
+
+    fn remote_edit_start_download(&mut self) {
+        let Some((source, remote, local)) = self.remote_edit.as_ref().map(|edit| {
+            (
+                edit.source,
+                edit.remote_path.clone(),
+                edit.local_path.clone(),
+            )
+        }) else {
+            return;
+        };
+        if let Some(edit) = self.remote_edit.as_mut() {
+            edit.phase = RemoteEditPhase::Downloading;
+        }
+        let sent = self
+            .sftp_edit_channel(source)
+            .map(|tx| tx.send(SftpCommand::EditDownload { remote, local }).is_ok())
+            .unwrap_or(false);
+        if sent {
+            if let Some(s) = self.sftp.as_mut() {
+                s.phase = Phase::Running;
+                s.progress = None;
+                s.notice = Some("retrying remote download".into());
+            }
+        } else {
+            self.remote_edit_error("SFTP is not connected — download not sent".into());
+        }
+    }
+
+    pub(crate) fn remote_edit_start_upload(&mut self) {
+        let Some((source, local, remote, expected, mode)) =
+            self.remote_edit.as_ref().and_then(|edit| {
+                edit.stamp.map(|stamp| {
+                    (
+                        edit.source,
+                        edit.local_path.clone(),
+                        edit.remote_path.clone(),
+                        stamp,
+                        edit.remote_mode,
+                    )
+                })
+            })
+        else {
+            return;
+        };
+        if let Some(edit) = self.remote_edit.as_mut() {
+            edit.phase = RemoteEditPhase::Uploading;
+        }
+        let sent = self
+            .sftp_edit_channel(source)
+            .map(|tx| {
+                tx.send(SftpCommand::EditUpload {
+                    local,
+                    remote,
+                    expected,
+                    mode,
+                })
+                .is_ok()
+            })
+            .unwrap_or(false);
+        if sent {
+            if let Some(s) = self.sftp.as_mut() {
+                s.phase = Phase::Running;
+                s.progress = None;
+                s.notice = Some("uploading edited file".into());
+            }
+        } else {
+            self.remote_edit_error("SFTP is not connected — upload not sent".into());
+        }
+    }
+
+    fn remote_edit_downloaded(&mut self, stamp: crate::sftp::transport::RemoteFileStamp) {
+        let Some(edit) = self.remote_edit.as_mut() else {
+            return;
+        };
+        if edit.phase != RemoteEditPhase::Downloading {
+            return;
+        }
+        edit.stamp = Some(stamp);
+        edit.phase = RemoteEditPhase::Editing;
+        if let Some(s) = self.sftp.as_mut() {
+            s.phase = Phase::Browsing;
+            s.progress = None;
+            s.notice = None;
+        }
+        let _ = self.start_local_editor();
+    }
+
+    fn remote_edit_uploaded(&mut self, mode_warning: Option<String>) {
+        if !self
+            .remote_edit
+            .as_ref()
+            .is_some_and(|edit| edit.phase == RemoteEditPhase::Uploading)
+        {
+            return;
+        }
+        self.remote_edit = None;
+        if let Some(s) = self.sftp.as_mut() {
+            s.phase = Phase::Browsing;
+            s.progress = None;
+            s.notice = Some(match mode_warning {
+                Some(warning) => format!("remote file updated; {warning}"),
+                None => "remote file updated".into(),
+            });
+        }
+        self.sftp_refresh_panes();
+    }
+
+    pub(crate) fn remote_edit_error(&mut self, message: String) {
+        let Some(edit) = self.remote_edit.as_mut() else {
+            return;
+        };
+        edit.phase = match edit.phase {
+            RemoteEditPhase::Downloading => RemoteEditPhase::RetryingDownload,
+            RemoteEditPhase::Uploading | RemoteEditPhase::RetryingUpload => {
+                RemoteEditPhase::RetryingUpload
+            }
+            phase => phase,
+        };
+        if let Some(s) = self.sftp.as_mut() {
+            s.phase = Phase::Browsing;
+            s.progress = None;
+            s.notice = Some(format!("{message} — press e to retry"));
+        }
     }
 
     /// Arm the delete confirmation for the focused pane's selection. Reuses the
@@ -803,6 +1084,12 @@ impl App {
             self.host_notice = Some("connect the SFTP browser first".into());
             return Ok(());
         }
+        if let Some(message) = self.left_pane_edit_blocked() {
+            if let Some(s) = self.sftp.as_mut() {
+                s.notice = Some(message.into());
+            }
+            return Ok(());
+        }
         let ssh_host = match &entry {
             HostEntry::Managed(m) => managed_to_ssh_host(m),
             HostEntry::Legacy { host, .. } => host.clone(),
@@ -833,6 +1120,12 @@ impl App {
     /// Send the left pane back to the local filesystem, dropping its server
     /// connection (the worker self-terminates when its sender goes).
     pub(crate) fn sftp_left_pane_to_local(&mut self) {
+        if let Some(message) = self.left_pane_edit_blocked() {
+            if let Some(s) = self.sftp.as_mut() {
+                s.notice = Some(message.into());
+            }
+            return;
+        }
         // Any relay in flight has one end on the server we're dropping.
         if self.sftp_relay.is_some() {
             self.sftp_relay_abort("second host disconnected — transfer stopped");
@@ -846,6 +1139,27 @@ impl App {
             s.left_connecting = false;
             s.local.cwd = cwd;
             s.local.set_entries(entries);
+        }
+    }
+
+    /// Block switching the left pane while an edit owned by its worker is in
+    /// flight: dropping `sftp_tx2` would strand the transfer, the working
+    /// copy, or a retry that can never resolve.
+    fn left_pane_edit_blocked(&self) -> Option<&'static str> {
+        let edit = self.remote_edit.as_ref()?;
+        if edit.source != EditSource::LeftRemote {
+            return None;
+        }
+        match edit.phase {
+            RemoteEditPhase::Downloading | RemoteEditPhase::Uploading => {
+                Some("wait for the edit transfer to finish before switching the left pane")
+            }
+            RemoteEditPhase::Editing if edit.editor_session.is_some() => {
+                Some("finish the local editor before switching the left pane")
+            }
+            // Retry phases still own a working copy: once the pane switches,
+            // the worker is gone and neither retry nor discard can complete.
+            _ => Some("finish or discard the edit before switching the left pane"),
         }
     }
 
@@ -1129,7 +1443,7 @@ impl App {
 
     /// Re-list both panes: remote via the worker (async `DirListing`), local
     /// synchronously. Used by the `r` refresh key and after a queue completes.
-    fn sftp_refresh_panes(&mut self) {
+    pub(crate) fn sftp_refresh_panes(&mut self) {
         let (remote_cwd, local_cwd) = match self.sftp.as_ref() {
             Some(s) => (s.remote.cwd.clone(), s.local.cwd.clone()),
             None => return,
@@ -1152,6 +1466,35 @@ impl App {
     /// Tear down the live session. Dropping the command `Sender` makes the
     /// worker thread self-terminate.
     fn sftp_disconnect(&mut self) {
+        if let Some(edit) = self.remote_edit.as_ref() {
+            // A local edit is independent of the SFTP workers: disconnecting
+            // the browser neither strands nor discards it.
+            if edit.source != EditSource::Local {
+                let message = match edit.phase {
+                    RemoteEditPhase::Downloading | RemoteEditPhase::Uploading => {
+                        Some("wait for the edit transfer to finish before disconnecting SFTP")
+                    }
+                    RemoteEditPhase::Editing if edit.editor_session.is_some() => {
+                        Some("finish the local editor before disconnecting SFTP")
+                    }
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    if let Some(s) = self.sftp.as_mut() {
+                        s.notice = Some(message.into());
+                    }
+                    return;
+                }
+            }
+        }
+        if self
+            .remote_edit
+            .as_ref()
+            .is_some_and(|e| e.source != EditSource::Local)
+        {
+            self.host_notice = Some("remote edit discarded".into());
+            self.remote_edit = None;
+        }
         // Mirror the way in (#35): a handshake that never completed carries the
         // "connecting…" layer off to the right, a live browser parts its panes
         // toward both edges. Both reveal the picker underneath.
@@ -1206,6 +1549,32 @@ impl App {
                     s.local.set_entries(entries);
                 }
             }
+            SftpEvent::EditDownloaded(stamp)
+                if self
+                    .remote_edit
+                    .as_ref()
+                    .is_some_and(|e| e.source == EditSource::LeftRemote) =>
+            {
+                self.remote_edit_downloaded(stamp)
+            }
+            SftpEvent::EditUploaded(warning)
+                if self
+                    .remote_edit
+                    .as_ref()
+                    .is_some_and(|e| e.source == EditSource::LeftRemote) =>
+            {
+                self.remote_edit_uploaded(warning)
+            }
+            SftpEvent::EditError(msg)
+                if self
+                    .remote_edit
+                    .as_ref()
+                    .is_some_and(|e| e.source == EditSource::LeftRemote) =>
+            {
+                self.remote_edit_error(msg)
+            }
+            SftpEvent::EditDownloaded(_) | SftpEvent::EditUploaded(_) | SftpEvent::EditError(_) => {
+            }
             SftpEvent::OpDone => self.sftp_refresh_panes(),
             SftpEvent::Error(msg) if self.sftp_relay.is_some() => {
                 self.sftp_run_failed = true;
@@ -1227,7 +1596,22 @@ impl App {
             }
             SftpEvent::Progress {
                 transferred, size, ..
-            } => self.sftp_relay_progress(transferred, size),
+            } if self.sftp_relay.is_some() => self.sftp_relay_progress(transferred, size),
+            SftpEvent::Progress {
+                index,
+                total,
+                transferred,
+                size,
+            } => {
+                if let Some(s) = self.sftp.as_mut() {
+                    s.progress = Some(crate::sftp::model::Progress {
+                        index,
+                        total,
+                        transferred,
+                        size,
+                    });
+                }
+            }
             SftpEvent::TransferDone(_) => {}
         }
     }
@@ -1275,6 +1659,32 @@ impl App {
                         }
                     }
                 }
+            }
+            SftpEvent::EditDownloaded(stamp)
+                if self
+                    .remote_edit
+                    .as_ref()
+                    .is_some_and(|e| e.source == EditSource::RightRemote) =>
+            {
+                self.remote_edit_downloaded(stamp)
+            }
+            SftpEvent::EditUploaded(warning)
+                if self
+                    .remote_edit
+                    .as_ref()
+                    .is_some_and(|e| e.source == EditSource::RightRemote) =>
+            {
+                self.remote_edit_uploaded(warning)
+            }
+            SftpEvent::EditError(msg)
+                if self
+                    .remote_edit
+                    .as_ref()
+                    .is_some_and(|e| e.source == EditSource::RightRemote) =>
+            {
+                self.remote_edit_error(msg)
+            }
+            SftpEvent::EditDownloaded(_) | SftpEvent::EditUploaded(_) | SftpEvent::EditError(_) => {
             }
             SftpEvent::Progress {
                 transferred, size, ..

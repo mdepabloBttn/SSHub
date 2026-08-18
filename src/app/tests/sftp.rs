@@ -31,6 +31,267 @@ pub(crate) fn sftp_picker_search_connects_to_filtered_host() {
     assert_eq!(app.sftp_host.as_deref(), Some("charlie"));
 }
 
+#[test]
+fn edit_key_starts_a_remote_download_for_the_right_pane() {
+    use crate::sftp::model::{FileEntry, SftpState};
+    use crate::sftp::SftpCommand;
+
+    let mut app = test_app(vec![]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut state = SftpState::new("/srv", "/tmp");
+    state.remote.set_entries(vec![FileEntry {
+        name: "notes.txt".into(),
+        is_dir: false,
+        size: 12,
+        is_symlink: false,
+        perm: Some(0o644),
+    }]);
+    state.remote.selected = 1; // row 0 is the synthetic ".." entry
+    app.sftp = Some(state);
+    app.sftp_tx = Some(tx);
+    app.active_tab = 1;
+
+    app.handle_key(key_char('e')).unwrap();
+
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        SftpCommand::EditDownload { remote, local }
+            if remote == std::path::Path::new("/srv/notes.txt")
+                && local.file_name().is_some_and(|name| name == "notes.txt")
+    ));
+    assert!(matches!(
+        app.remote_edit.as_ref().map(|edit| edit.phase),
+        Some(RemoteEditPhase::Downloading)
+    ));
+    assert!(matches!(
+        app.remote_edit.as_ref().map(|edit| edit.source),
+        Some(EditSource::RightRemote)
+    ));
+}
+
+#[test]
+fn edit_key_starts_a_local_edit_in_place_for_the_local_pane() {
+    use crate::sftp::model::{FileEntry, Focus, SftpState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "hello").unwrap();
+
+    crate::config::with_test_config_dir(dir.path(), || {
+        let _visual = crate::config::EnvVar::set("VISUAL", "definitely-not-an-editor-sshub-test");
+
+        let mut app = test_app(vec![]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut state = SftpState::new("/srv", dir.path().to_str().unwrap());
+        state.focus = Focus::Local;
+        state.local.set_entries(vec![FileEntry {
+            name: "notes.txt".into(),
+            is_dir: false,
+            size: 5,
+            is_symlink: false,
+            perm: Some(0o644),
+        }]);
+        state.local.selected = 1;
+        state.local.cwd = dir.path().to_path_buf();
+        app.sftp = Some(state);
+        app.sftp_tx = Some(tx);
+        app.active_tab = 1;
+
+        app.handle_key(key_char('e')).unwrap();
+
+        // No worker involved: the file is edited in place.
+        assert!(rx.try_recv().is_err());
+        let edit = app.remote_edit.as_ref().expect("local edit started");
+        assert_eq!(edit.source, EditSource::Local);
+        assert_eq!(edit.local_path, file);
+        assert!(edit.temp_dir.is_none());
+        // The bogus $VISUAL never spawns a session: the editor start fails and
+        // the edit waits for a retry instead of downloading anything.
+        assert_eq!(edit.phase, RemoteEditPhase::RetryingEditor);
+        assert!(app
+            .sftp
+            .as_ref()
+            .and_then(|state| state.notice.as_deref())
+            .is_some_and(|notice| notice.contains("press e to retry")));
+    });
+}
+
+#[test]
+fn edit_key_routes_the_download_to_the_second_worker() {
+    use crate::sftp::model::{FileEntry, Focus, SftpState};
+    use crate::sftp::SftpCommand;
+
+    let mut app = test_app(vec![]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut state = SftpState::new("/srv", "/tmp");
+    state.focus = Focus::Local;
+    state.left_host = Some("second".into());
+    state.local.set_entries(vec![FileEntry {
+        name: "notes.txt".into(),
+        is_dir: false,
+        size: 12,
+        is_symlink: false,
+        perm: Some(0o644),
+    }]);
+    state.local.selected = 1;
+    state.local.cwd = std::path::PathBuf::from("/srv");
+    app.sftp = Some(state);
+    app.sftp_tx2 = Some(tx);
+    app.active_tab = 1;
+
+    app.handle_key(key_char('e')).unwrap();
+
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        SftpCommand::EditDownload { remote, local }
+            if remote == std::path::Path::new("/srv/notes.txt")
+                && local.file_name().is_some_and(|name| name == "notes.txt")
+    ));
+    assert!(matches!(
+        app.remote_edit
+            .as_ref()
+            .map(|edit| (edit.source, edit.phase)),
+        Some((EditSource::LeftRemote, RemoteEditPhase::Downloading))
+    ));
+}
+
+#[test]
+fn switching_the_left_pane_waits_for_a_second_server_edit() {
+    use crate::sftp::model::SftpState;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    app.active_tab = 1;
+    let temp_dir = tempfile::tempdir().unwrap();
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::LeftRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path: temp_dir.path().join("notes.txt"),
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp: None,
+        phase: RemoteEditPhase::Downloading,
+        editor_session: None,
+    });
+    let (tx, _rx) = std::sync::mpsc::channel::<crate::sftp::SftpCommand>();
+    app.sftp_tx2 = Some(tx);
+
+    app.sftp_left_pane_to_local();
+
+    assert!(
+        app.sftp_tx2.is_some(),
+        "switching the left pane must wait for the edit transfer"
+    );
+    assert!(
+        app.remote_edit.is_some(),
+        "the working copy must be retained"
+    );
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_deref())
+        .is_some_and(|notice| notice.contains("wait for the edit transfer")));
+}
+
+/// A retry-phase edit still owns a working copy: switching the left pane away
+/// would kill the only worker that could ever finish it, so the pane must be
+/// locked until the edit is retried or discarded.
+#[test]
+fn switching_the_left_pane_waits_for_a_second_server_edit_retry() {
+    use crate::sftp::model::SftpState;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    app.active_tab = 1;
+    let temp_dir = tempfile::tempdir().unwrap();
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::LeftRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path: temp_dir.path().join("notes.txt"),
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp: None,
+        phase: RemoteEditPhase::RetryingEditor,
+        editor_session: None,
+    });
+    let (tx, _rx) = std::sync::mpsc::channel::<crate::sftp::SftpCommand>();
+    app.sftp_tx2 = Some(tx);
+
+    app.sftp_left_pane_to_local();
+
+    assert!(app.sftp_tx2.is_some(), "retry-phase edits lock the pane");
+    assert!(app.remote_edit.is_some());
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_deref())
+        .is_some_and(|notice| notice.contains("finish or discard the edit")));
+}
+
+#[test]
+fn local_edit_finish_clears_state_without_an_upload() {
+    use crate::sftp::model::SftpState;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    app.active_tab = 1;
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::Local,
+        remote_path: "/tmp/notes.txt".into(),
+        local_path: "/tmp/notes.txt".into(),
+        temp_dir: None,
+        remote_mode: None,
+        stamp: None,
+        phase: RemoteEditPhase::Editing,
+        editor_session: None,
+    });
+
+    app.local_edit_finished();
+
+    assert!(app.remote_edit.is_none());
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_deref())
+        .is_some_and(|notice| notice.contains("local file edited")));
+}
+
+#[test]
+fn disconnect_waits_for_an_active_edit_transfer() {
+    use crate::sftp::model::SftpState;
+
+    let mut app = test_app(vec![]);
+    app.sftp = Some(SftpState::new("/srv", "/tmp"));
+    app.active_tab = 1;
+    let temp_dir = tempfile::tempdir().unwrap();
+    app.remote_edit = Some(RemoteEditState {
+        source: EditSource::RightRemote,
+        remote_path: "/srv/notes.txt".into(),
+        local_path: temp_dir.path().join("notes.txt"),
+        temp_dir: Some(temp_dir),
+        remote_mode: Some(0o644),
+        stamp: None,
+        phase: RemoteEditPhase::Downloading,
+        editor_session: None,
+    });
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+
+    assert!(
+        app.sftp.is_some(),
+        "the active transfer must not be detached"
+    );
+    assert!(
+        app.remote_edit.is_some(),
+        "the working copy must be retained"
+    );
+    assert!(app
+        .sftp
+        .as_ref()
+        .and_then(|state| state.notice.as_deref())
+        .is_some_and(|notice| notice.contains("wait for the edit transfer")));
+}
+
 /// The SFTP progress bar sweeps toward the worker's chunked figure (#35),
 /// settles on it, and resets outright when the queue moves to the next file.
 #[test]

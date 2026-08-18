@@ -12,6 +12,7 @@ mod identities;
 mod import;
 mod keygen;
 mod keys;
+mod local_editor;
 mod local_shell;
 mod mouse;
 mod push_key;
@@ -404,6 +405,8 @@ pub struct App {
     pub sftp: Option<crate::sftp::model::SftpState>,
     pub sftp_tx: Option<std::sync::mpsc::Sender<crate::sftp::SftpCommand>>,
     pub sftp_rx: Option<std::sync::mpsc::Receiver<crate::sftp::SftpEvent>>,
+    /// The remote file currently being synchronized with a local editor.
+    pub remote_edit: Option<RemoteEditState>,
     /// Name of the host the live SFTP session is connected to, so the browser
     /// can open an SSH session back to the same host (completes the round trip).
     pub sftp_host: Option<String>,
@@ -990,6 +993,7 @@ impl App {
             sftp: None,
             sftp_tx: None,
             sftp_rx: None,
+            remote_edit: None,
             sftp_host: None,
             sftp_tx2: None,
             sftp_rx2: None,

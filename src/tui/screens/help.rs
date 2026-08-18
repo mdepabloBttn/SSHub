@@ -469,6 +469,10 @@ pub const HELP_ITEMS: &[HelpItem] = &[
         desc: "Change permissions (chmod, octal)",
     },
     HelpItem::Entry {
+        key: "e",
+        desc: "Edit the selected file locally; remote files sync when the editor closes",
+    },
+    HelpItem::Entry {
         key: "r",
         desc: "Refresh both panes",
     },

@@ -289,7 +289,16 @@ impl App {
             self.mode = AppMode::Normal;
             return;
         };
+        let cancelled_editor = self
+            .remote_edit
+            .as_ref()
+            .is_some_and(|edit| edit.editor_session == Some(idx));
         if idx < self.sessions.len() {
+            if cancelled_editor {
+                if let Some(edit) = self.remote_edit.as_mut() {
+                    edit.editor_session = None;
+                }
+            }
             // If we were armed with a secret but never fired, surface what
             // we actually saw on the screen so the user can tell us whether
             // the prompt text didn't match or no prompt arrived at all.
@@ -320,6 +329,15 @@ impl App {
 
             // Session::drop kills the child + joins the reader thread.
             self.sessions.remove(idx);
+            if !cancelled_editor {
+                if let Some(edit) = self.remote_edit.as_mut() {
+                    if let Some(editor_idx) = edit.editor_session {
+                        if editor_idx > idx {
+                            edit.editor_session = Some(editor_idx - 1);
+                        }
+                    }
+                }
+            }
         }
         if self.sessions.is_empty() {
             self.active_session = None;
@@ -345,6 +363,12 @@ impl App {
                     _ => AppMode::Session,
                 }
             };
+        }
+
+        if cancelled_editor {
+            self.remote_edit_editor_failed("local editor closed before saving".into());
+            self.mode = AppMode::Normal;
+            self.active_tab = 1;
         }
     }
 
@@ -413,6 +437,7 @@ impl App {
     pub fn shutdown_all(&mut self) {
         self.sessions.clear();
         self.active_session = None;
+        self.remote_edit = None;
     }
 
     /// Copy the SSH log entries for the selected host to the system clipboard

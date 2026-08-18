@@ -51,6 +51,20 @@ pub trait SftpTransport {
     /// with the target's size, symlink-to-dir and broken links are skipped.
     fn stat(&mut self, path: &Path) -> Result<(bool, u64)>;
 
+    /// Return the parts of a remote file's metadata used to detect an edit
+    /// conflict before uploading a local working copy.
+    fn file_stamp(&mut self, path: &Path) -> Result<RemoteFileStamp> {
+        let (is_dir, size) = self.stat(path)?;
+        if is_dir {
+            anyhow::bail!("{} is a directory", path.display());
+        }
+        Ok(RemoteFileStamp {
+            size,
+            mtime: None,
+            is_regular: true,
+        })
+    }
+
     fn remove(&mut self, path: &Path, is_dir: bool) -> Result<()>;
 
     /// Create a remote directory (mode 0755).
@@ -61,6 +75,15 @@ pub trait SftpTransport {
 
     /// Set the permission bits of a remote path (chmod).
     fn chmod(&mut self, path: &Path, mode: u32) -> Result<()>;
+}
+
+/// Lightweight remote identity for an edited file. Some SFTP servers do not
+/// report modification times, so size is retained as a fallback signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteFileStamp {
+    pub size: u64,
+    pub mtime: Option<u64>,
+    pub is_regular: bool,
 }
 
 /// Chunk size for streaming transfers (also the progress throttle granularity).
@@ -420,6 +443,25 @@ impl SftpTransport for Ssh2Transport {
             .stat(path)
             .with_context(|| format!("failed to stat {}", path.display()))?;
         Ok((st.is_dir(), st.size.unwrap_or(0)))
+    }
+
+    fn file_stamp(&mut self, path: &Path) -> Result<RemoteFileStamp> {
+        let sftp = self.sftp_ref()?;
+        let st = sftp
+            .stat(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        let is_regular = st
+            .perm
+            .map(|perm| perm & 0o170000 == 0o100000)
+            .unwrap_or(true);
+        if st.is_dir() || !is_regular {
+            anyhow::bail!("{} is not a regular file", path.display());
+        }
+        Ok(RemoteFileStamp {
+            size: st.size.unwrap_or(0),
+            mtime: st.mtime,
+            is_regular,
+        })
     }
 
     fn remove(&mut self, path: &Path, is_dir: bool) -> Result<()> {

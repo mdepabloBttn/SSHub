@@ -322,10 +322,16 @@ Defaults below. Rebind any action with **Ctrl+K** (saved to `config.toml`). Pres
 | `.`                | Show / hide dotfiles in both panes (remembered)      |
 | `d`                | Delete (recursive)                                   |
 | `n` / `R` / `M`    | New folder / rename / chmod                          |
+| `e`                | Edit the selected file locally (remote files upload on save) |
 | `r`                | Refresh both panes                                   |
 | `s`                | Open an SSH session to this host                     |
 | `/`                | Filter the focused pane                              |
 | `Esc`              | Disconnect, back to the picker                       |
+
+`e` uses `$VISUAL`, then `$EDITOR`, and falls back to `nano`. GUI editors should
+be configured to wait for the file to close (for example, `code --wait`).
+Works in both SFTP panes (the connected server and the second server) and on
+local files, which are edited in place.
 
 ### Tunnels (tab 3)
 

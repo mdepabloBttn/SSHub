@@ -1129,6 +1129,7 @@ fn footer_keybinds(app: &App) -> (Vec<(String, &'static str)>, usize) {
             ("n".into(), "new dir"),
             ("R".into(), "rename"),
             ("M".into(), "chmod"),
+            ("e".into(), "edit"),
             ("r".into(), "refresh"),
             ("s".into(), "ssh"),
             (
