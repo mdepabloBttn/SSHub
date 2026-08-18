@@ -32,6 +32,10 @@ pub enum SftpCommand {
     EditDownload { remote: PathBuf, local: PathBuf },
     /// Upload a locally edited file after checking that the remote file still
     /// has the stamp captured before editing.
+    ///
+    /// Check-then-act, not atomic: `file_stamp` then `upload` (temp +
+    /// overwrite rename). A remote writer that lands between the two still
+    /// wins the rename.
     EditUpload {
         local: PathBuf,
         remote: PathBuf,
@@ -177,6 +181,8 @@ fn worker_loop(
             } => {
                 let mut delivery_failed = false;
                 let result: Result<Option<String>> = (|| {
+                    // TOCTOU: stamp is observed here; upload below will
+                    // overwrite whatever the path names at rename time.
                     let current = transport.file_stamp(&remote)?;
                     if current != expected {
                         anyhow::bail!(
@@ -603,6 +609,9 @@ mod tests {
         listings: HashMap<PathBuf, Vec<FileEntry>>,
         /// Canned follow-stat results for symlink classification.
         stats: HashMap<PathBuf, (bool, u64)>,
+        /// Canned edit-conflict stamps. Separate from `stats` so a test
+        /// cannot accidentally inherit the trait's old "size only" default.
+        stamps: HashMap<PathBuf, RemoteFileStamp>,
         /// Total "size" every fake transfer reports/moves.
         transfer_size: u64,
         /// Records of every download/upload requested, in order.
@@ -620,6 +629,7 @@ mod tests {
             Self {
                 listings: HashMap::new(),
                 stats: HashMap::new(),
+                stamps: HashMap::new(),
                 transfer_size,
                 calls: Arc::new(Mutex::new(Vec::new())),
                 ops: Arc::new(Mutex::new(Vec::new())),
@@ -636,6 +646,11 @@ mod tests {
 
         fn with_stat(mut self, path: impl Into<PathBuf>, is_dir: bool, size: u64) -> Self {
             self.stats.insert(path.into(), (is_dir, size));
+            self
+        }
+
+        fn with_stamp(mut self, path: impl Into<PathBuf>, stamp: RemoteFileStamp) -> Self {
+            self.stamps.insert(path.into(), stamp);
             self
         }
 
@@ -697,6 +712,13 @@ mod tests {
                 .get(path)
                 .copied()
                 .ok_or_else(|| anyhow!("no canned stat for {}", path.display()))
+        }
+
+        fn file_stamp(&mut self, path: &Path) -> Result<RemoteFileStamp> {
+            self.stamps
+                .get(path)
+                .copied()
+                .ok_or_else(|| anyhow!("no canned stamp for {}", path.display()))
         }
 
         fn download(
@@ -1058,7 +1080,12 @@ mod tests {
 
     #[test]
     fn edit_download_emits_the_original_remote_stamp() {
-        let mut t = MockTransport::new(42).with_stat("/srv/a.txt", false, 42);
+        let stamp = RemoteFileStamp {
+            size: 42,
+            mtime: Some(1_700_000_000),
+            is_regular: true,
+        };
+        let mut t = MockTransport::new(42).with_stamp("/srv/a.txt", stamp);
         let events = drive(
             &mut t,
             vec![SftpCommand::EditDownload {
@@ -1069,11 +1096,7 @@ mod tests {
 
         assert!(events.iter().any(|event| matches!(
             event,
-            SftpEvent::EditDownloaded(RemoteFileStamp {
-                size: 42,
-                mtime: None,
-                is_regular: true
-            })
+            SftpEvent::EditDownloaded(got) if *got == stamp
         )));
         assert_eq!(
             t.calls_handle().lock().unwrap().as_slice(),
@@ -1087,17 +1110,18 @@ mod tests {
 
     #[test]
     fn edit_upload_checks_stamp_and_restores_mode() {
-        let mut t = MockTransport::new(42).with_stat("/srv/a.txt", false, 42);
+        let stamp = RemoteFileStamp {
+            size: 42,
+            mtime: Some(1_700_000_000),
+            is_regular: true,
+        };
+        let mut t = MockTransport::new(42).with_stamp("/srv/a.txt", stamp);
         let events = drive(
             &mut t,
             vec![SftpCommand::EditUpload {
                 local: PathBuf::from("/tmp/edit/a.txt"),
                 remote: PathBuf::from("/srv/a.txt"),
-                expected: RemoteFileStamp {
-                    size: 42,
-                    mtime: None,
-                    is_regular: true,
-                },
+                expected: stamp,
                 mode: Some(0o755),
             }],
         );
@@ -1114,7 +1138,14 @@ mod tests {
 
     #[test]
     fn edit_upload_refuses_a_changed_remote_file() {
-        let mut t = MockTransport::new(42).with_stat("/srv/a.txt", false, 99);
+        let mut t = MockTransport::new(42).with_stamp(
+            "/srv/a.txt",
+            RemoteFileStamp {
+                size: 99,
+                mtime: Some(1_700_000_000),
+                is_regular: true,
+            },
+        );
         let events = drive(
             &mut t,
             vec![SftpCommand::EditUpload {
@@ -1122,7 +1153,69 @@ mod tests {
                 remote: PathBuf::from("/srv/a.txt"),
                 expected: RemoteFileStamp {
                     size: 42,
-                    mtime: None,
+                    mtime: Some(1_700_000_000),
+                    is_regular: true,
+                },
+                mode: None,
+            }],
+        );
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SftpEvent::EditError(_))));
+        assert!(t.calls_handle().lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn edit_upload_refuses_same_size_when_mtime_changes() {
+        // The old trait default dropped mtime, so a same-size rewrite slipped
+        // through. The worker must compare the full observed stamp.
+        let mut t = MockTransport::new(42).with_stamp(
+            "/srv/a.txt",
+            RemoteFileStamp {
+                size: 42,
+                mtime: Some(2),
+                is_regular: true,
+            },
+        );
+        let events = drive(
+            &mut t,
+            vec![SftpCommand::EditUpload {
+                local: PathBuf::from("/tmp/edit/a.txt"),
+                remote: PathBuf::from("/srv/a.txt"),
+                expected: RemoteFileStamp {
+                    size: 42,
+                    mtime: Some(1),
+                    is_regular: true,
+                },
+                mode: None,
+            }],
+        );
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SftpEvent::EditError(_))));
+        assert!(t.calls_handle().lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn edit_upload_refuses_when_remote_is_no_longer_regular() {
+        let mut t = MockTransport::new(42).with_stamp(
+            "/srv/a.txt",
+            RemoteFileStamp {
+                size: 42,
+                mtime: Some(1),
+                is_regular: false,
+            },
+        );
+        let events = drive(
+            &mut t,
+            vec![SftpCommand::EditUpload {
+                local: PathBuf::from("/tmp/edit/a.txt"),
+                remote: PathBuf::from("/srv/a.txt"),
+                expected: RemoteFileStamp {
+                    size: 42,
+                    mtime: Some(1),
                     is_regular: true,
                 },
                 mode: None,

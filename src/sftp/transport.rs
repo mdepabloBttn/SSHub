@@ -44,27 +44,30 @@ pub trait SftpTransport {
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<()>;
 
-    /// Remove a remote path. A file is unlinked; a directory is removed
-    /// recursively (contents first, then the directory itself).
     /// Follow-symlink stat: `(is_dir, size)` of the resolved target. Transfer
     /// planning uses it to classify symlinks — a symlink-to-file transfers
     /// with the target's size, symlink-to-dir and broken links are skipped.
+    ///
+    /// This is not a substitute for [`file_stamp`]: it cannot observe `mtime`
+    /// or the file type, so a backend must not invent a stamp from it.
     fn stat(&mut self, path: &Path) -> Result<(bool, u64)>;
 
-    /// Return the parts of a remote file's metadata used to detect an edit
+    /// Observed identity of a remote regular file, used to detect an edit
     /// conflict before uploading a local working copy.
-    fn file_stamp(&mut self, path: &Path) -> Result<RemoteFileStamp> {
-        let (is_dir, size) = self.stat(path)?;
-        if is_dir {
-            anyhow::bail!("{} is a directory", path.display());
-        }
-        Ok(RemoteFileStamp {
-            size,
-            mtime: None,
-            is_regular: true,
-        })
-    }
+    ///
+    /// Report the values the server actually sent. Do not invent
+    /// `mtime: None` or `is_regular: true` from [`stat`] — that reduces the
+    /// worker's conflict check to "same size" and treats sockets, fifos and
+    /// devices as regular files.
+    ///
+    /// Not a compare-and-swap. The worker calls this, then later
+    /// [`upload`](Self::upload)s (temp file + overwrite rename). Another
+    /// writer can change the path in that window; SFTP has no atomic
+    /// "replace if stamp still matches".
+    fn file_stamp(&mut self, path: &Path) -> Result<RemoteFileStamp>;
 
+    /// Remove a remote path. A file is unlinked; a directory is removed
+    /// recursively (contents first, then the directory itself).
     fn remove(&mut self, path: &Path, is_dir: bool) -> Result<()>;
 
     /// Create a remote directory (mode 0755).
@@ -77,8 +80,12 @@ pub trait SftpTransport {
     fn chmod(&mut self, path: &Path, mode: u32) -> Result<()>;
 }
 
-/// Lightweight remote identity for an edited file. Some SFTP servers do not
-/// report modification times, so size is retained as a fallback signal.
+/// Lightweight remote identity for an edited file.
+///
+/// `mtime` is `None` only when the server omitted it, never because the
+/// transport declined to look. `is_regular` must be observed from the type
+/// bits, not assumed. Size remains the fallback signal when the server has
+/// no modification time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteFileStamp {
     pub size: u64,
@@ -450,18 +457,7 @@ impl SftpTransport for Ssh2Transport {
         let st = sftp
             .stat(path)
             .with_context(|| format!("failed to stat {}", path.display()))?;
-        let is_regular = st
-            .perm
-            .map(|perm| perm & 0o170000 == 0o100000)
-            .unwrap_or(true);
-        if st.is_dir() || !is_regular {
-            anyhow::bail!("{} is not a regular file", path.display());
-        }
-        Ok(RemoteFileStamp {
-            size: st.size.unwrap_or(0),
-            mtime: st.mtime,
-            is_regular,
-        })
+        stamp_from_stat(path, &st)
     }
 
     fn remove(&mut self, path: &Path, is_dir: bool) -> Result<()> {
@@ -503,10 +499,36 @@ impl SftpTransport for Ssh2Transport {
     }
 }
 
-/// S_IFLNK (0o120000) in the file-type bits of the mode. `readdir` returns
-/// lstat-style attributes, so this identifies the link itself, not its target.
+/// S_IFMT — file-type bits of a POSIX mode.
+const S_IFMT: u32 = 0o170000;
+/// S_IFREG — regular file.
+const S_IFREG: u32 = 0o100000;
+/// S_IFLNK — symbolic link.
+const S_IFLNK: u32 = 0o120000;
+
+/// S_IFLNK in the file-type bits of the mode. `readdir` returns lstat-style
+/// attributes, so this identifies the link itself, not its target.
 fn is_symlink(stat: &ssh2::FileStat) -> bool {
-    stat.perm.map(|p| p & 0o170000 == 0o120000).unwrap_or(false)
+    stat.perm.map(|p| p & S_IFMT == S_IFLNK).unwrap_or(false)
+}
+
+/// Build a conflict-detection stamp from a follow-stat `FileStat`.
+///
+/// Missing type bits are "not a regular file": the worker must not invent a
+/// successful type check. `mtime` is passed through as the server sent it.
+fn stamp_from_stat(path: &Path, st: &ssh2::FileStat) -> Result<RemoteFileStamp> {
+    let is_regular = st
+        .perm
+        .map(|perm| perm & S_IFMT == S_IFREG)
+        .unwrap_or(false);
+    if st.is_dir() || !is_regular {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    Ok(RemoteFileStamp {
+        size: st.size.unwrap_or(0),
+        mtime: st.mtime,
+        is_regular,
+    })
 }
 
 /// Recursively delete a remote directory: contents first (files unlinked,
@@ -731,5 +753,65 @@ mod tests {
                 "entry does not round-trip to the source key: {line}"
             );
         }
+    }
+
+    fn filestat(size: Option<u64>, perm: Option<u32>, mtime: Option<u64>) -> ssh2::FileStat {
+        ssh2::FileStat {
+            size,
+            uid: None,
+            gid: None,
+            perm,
+            atime: None,
+            mtime,
+        }
+    }
+
+    #[test]
+    fn stamp_from_stat_keeps_observed_mtime_and_type() {
+        let stamp = stamp_from_stat(
+            Path::new("/srv/a.txt"),
+            &filestat(Some(42), Some(S_IFREG | 0o644), Some(1_700_000_000)),
+        )
+        .unwrap();
+        assert_eq!(
+            stamp,
+            RemoteFileStamp {
+                size: 42,
+                mtime: Some(1_700_000_000),
+                is_regular: true,
+            }
+        );
+    }
+
+    #[test]
+    fn stamp_from_stat_refuses_directories() {
+        let err = stamp_from_stat(
+            Path::new("/srv/dir"),
+            &filestat(Some(0), Some(0o040000 | 0o755), None),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a regular file"));
+    }
+
+    #[test]
+    fn stamp_from_stat_refuses_non_regular_types() {
+        for perm in [S_IFLNK | 0o777, 0o010000 | 0o666, 0o140000 | 0o666] {
+            let err = stamp_from_stat(
+                Path::new("/srv/x"),
+                &filestat(Some(42), Some(perm), Some(1)),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not a regular file"),
+                "perm {perm:#o} should not look regular"
+            );
+        }
+    }
+
+    #[test]
+    fn stamp_from_stat_does_not_invent_regular_when_type_bits_missing() {
+        let err = stamp_from_stat(Path::new("/srv/a.txt"), &filestat(Some(42), None, Some(9)))
+            .unwrap_err();
+        assert!(err.to_string().contains("not a regular file"));
     }
 }
