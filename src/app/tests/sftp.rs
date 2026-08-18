@@ -3,32 +3,30 @@ use super::*;
 /// SSH-config hosts must keep the resolved username and identity when the
 /// native SFTP transport connects. The regular SSH session uses the alias and
 /// therefore gets these fields from OpenSSH; libssh2 needs them explicitly.
+///
+/// The row in the store only has address/port (what import persists). Auth
+/// fields come from the resolver, same as a live `ssh -G`.
 #[test]
 fn sftp_preserves_ssh_config_authentication_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config");
-    std::fs::write(
-        &config,
-        "Host VM.W10\n    HostName 192.168.122.212\n    User marc\n    IdentityFile /tmp/sshub-test-key\n",
-    )
-    .unwrap();
+    let mut cfg = host("cfg");
+    cfg.user = Some("deploy".into());
+    cfg.identity_file = Some("/tmp/sshub-test-key".into());
 
-    let mut app = test_app(vec![]);
+    let mut app = test_app(vec![("cfg", cfg)]);
     app.store
         .upsert_ssh_config_host(&crate::store::SshConfigHostImport {
-            name: "VM.W10".into(),
-            address: "192.168.122.212".into(),
+            name: "cfg".into(),
+            address: "cfg.example.com".into(),
             port: 22,
             ssh_config_hash: "stale".into(),
             ..Default::default()
         })
         .unwrap();
-    app.resolver = Box::new(crate::ssh::SshConfigResolver::with_config_path(config));
     app.reload_hosts().unwrap();
     let entry = app
         .hosts
         .iter()
-        .find(|entry| entry.name() == "VM.W10")
+        .find(|entry| entry.name() == "cfg")
         .expect("ssh-config host loaded");
     assert!(matches!(
         entry,
@@ -37,7 +35,7 @@ fn sftp_preserves_ssh_config_authentication_fields() {
 
     let resolved = app.sftp_ssh_host(entry).unwrap();
 
-    assert_eq!(resolved.user.as_deref(), Some("marc"));
+    assert_eq!(resolved.user.as_deref(), Some("deploy"));
     assert_eq!(
         resolved.identity_file.as_deref(),
         Some("/tmp/sshub-test-key")
@@ -45,19 +43,19 @@ fn sftp_preserves_ssh_config_authentication_fields() {
 
     let mut overlaid = entry.clone();
     if let HostEntry::Managed(managed) = &mut overlaid {
-        managed.username = Some("metadata-user".into());
+        managed.username = Some("override".into());
         managed.identity = Some(crate::store::Identity {
             id: 1,
-            name: "metadata".into(),
+            name: "id0".into(),
             username: None,
-            private_key: Some(std::path::PathBuf::from("/tmp/metadata-key")),
+            private_key: Some(std::path::PathBuf::from("/tmp/override-key")),
             certificate: None,
             has_password: false,
         });
     }
     let resolved = app.sftp_ssh_host(&overlaid).unwrap();
-    assert_eq!(resolved.user.as_deref(), Some("metadata-user"));
-    assert_eq!(resolved.identity_file.as_deref(), Some("/tmp/metadata-key"));
+    assert_eq!(resolved.user.as_deref(), Some("override"));
+    assert_eq!(resolved.identity_file.as_deref(), Some("/tmp/override-key"));
 
     if let HostEntry::Managed(managed) = &mut overlaid {
         managed.identity.as_mut().unwrap().private_key = None;
@@ -71,11 +69,7 @@ fn sftp_preserves_ssh_config_authentication_fields() {
 
 #[test]
 fn sftp_reports_a_missing_ssh_config_for_a_stale_host() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config");
-    std::fs::write(&config, "Host other\n    HostName 192.0.2.11\n").unwrap();
-
-    let mut app = test_app(vec![]);
+    let mut app = test_app(vec![("other", host("other"))]);
     app.store
         .upsert_ssh_config_host(&crate::store::SshConfigHostImport {
             name: "stale".into(),
@@ -85,7 +79,6 @@ fn sftp_reports_a_missing_ssh_config_for_a_stale_host() {
             ..Default::default()
         })
         .unwrap();
-    app.resolver = Box::new(crate::ssh::SshConfigResolver::with_config_path(config));
     app.reload_hosts().unwrap();
     app.active_tab = 1;
 
