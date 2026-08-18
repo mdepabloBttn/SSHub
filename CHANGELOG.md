@@ -26,6 +26,12 @@ All notable changes to SSHub are documented in this file.
   `script(1)` wrapping fights the redirection exec exists for — and mosh hosts
   are refused, having no one-shot command mode.
 
+### Fixed
+
+- **SFTP connections for imported SSH-config hosts lost their authentication** -
+  the native SFTP transport now resolves the configured username and identity
+  file instead of using only the cached address and port.
+
 ## [0.14.2] - 2026-08-12
 
 ### Fixed

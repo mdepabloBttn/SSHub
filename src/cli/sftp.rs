@@ -54,7 +54,13 @@ fn connect_worker(
             return Err(1);
         }
     };
-    let ssh_host = entry.ssh_host();
+    let ssh_host = match crate::app::resolve_sftp_ssh_host(&entry, &ctx.resolver) {
+        Ok(host) => host,
+        Err(e) => {
+            eprintln!("sshub: SFTP host resolution failed: {e:#}");
+            return Err(1);
+        }
+    };
     if ssh_host.proxy_jump.is_some() {
         eprintln!("sshub: SFTP via ProxyJump is not supported; pick a direct host");
         return Err(1);

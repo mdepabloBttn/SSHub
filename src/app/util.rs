@@ -248,6 +248,46 @@ pub fn ssh_argv_for_entry(entry: &HostEntry) -> Vec<String> {
     }
 }
 
+/// Resolve the connection fields needed by native SFTP.
+///
+/// SSH-config-backed sessions pass the alias to OpenSSH, which resolves the
+/// username and identity file itself. libssh2 needs those fields explicitly;
+/// launcher and legacy entries already carry their complete connection data.
+pub fn resolve_sftp_ssh_host(
+    entry: &HostEntry,
+    resolver: &dyn crate::ssh::HostResolver,
+) -> Result<SshHost> {
+    match entry {
+        HostEntry::Managed(m) if m.source == HostSource::SshConfig => {
+            let aliases = resolver
+                .list_hosts()
+                .map_err(|e| anyhow::anyhow!("could not list SSH config hosts for SFTP: {e:#}"))?;
+            if !aliases.iter().any(|alias| alias == &m.name) {
+                anyhow::bail!("host '{}' is no longer present in ssh_config", m.name);
+            }
+            let mut resolved = resolver.resolve_host(&m.name).map_err(|e| {
+                anyhow::anyhow!("could not resolve {}/ssh_config for SFTP: {e:#}", m.name)
+            })?;
+            let metadata_host = managed_to_ssh_host(m);
+            if metadata_host.user.is_some() {
+                resolved.user = metadata_host.user;
+            }
+            if let Some(identity) = &m.identity {
+                // A keyless metadata identity is the default/no-override case;
+                // keep the key selected by ssh_config instead of clearing it.
+                if identity.private_key.is_some() {
+                    resolved.identity_file = metadata_host.identity_file;
+                }
+                if identity.certificate.is_some() {
+                    resolved.certificate_file = metadata_host.certificate_file;
+                }
+            }
+            Ok(resolved)
+        }
+        _ => Ok(entry.ssh_host()),
+    }
+}
+
 pub(crate) fn managed_to_ssh_host(m: &ManagedHost) -> SshHost {
     let mut host = SshHost::new(&m.name);
     host.hostname = Some(m.address.clone());
