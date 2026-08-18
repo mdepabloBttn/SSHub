@@ -60,11 +60,11 @@ fn edit_key_starts_a_remote_download_for_the_right_pane() {
                 && local.file_name().is_some_and(|name| name == "notes.txt")
     ));
     assert!(matches!(
-        app.remote_edit.as_ref().map(|edit| edit.phase),
-        Some(RemoteEditPhase::Downloading)
+        app.file_edit.as_ref().map(|edit| edit.phase),
+        Some(FileEditPhase::Downloading)
     ));
     assert!(matches!(
-        app.remote_edit.as_ref().map(|edit| edit.source),
+        app.file_edit.as_ref().map(|edit| edit.source),
         Some(EditSource::RightRemote)
     ));
 }
@@ -101,13 +101,13 @@ fn edit_key_starts_a_local_edit_in_place_for_the_local_pane() {
 
         // No worker involved: the file is edited in place.
         assert!(rx.try_recv().is_err());
-        let edit = app.remote_edit.as_ref().expect("local edit started");
+        let edit = app.file_edit.as_ref().expect("local edit started");
         assert_eq!(edit.source, EditSource::Local);
         assert_eq!(edit.local_path, file);
         assert!(edit.temp_dir.is_none());
         // The bogus $VISUAL never spawns a session: the editor start fails and
         // the edit waits for a retry instead of downloading anything.
-        assert_eq!(edit.phase, RemoteEditPhase::RetryingEditor);
+        assert_eq!(edit.phase, FileEditPhase::RetryingEditor);
         assert!(app
             .sftp
             .as_ref()
@@ -148,10 +148,8 @@ fn edit_key_routes_the_download_to_the_second_worker() {
                 && local.file_name().is_some_and(|name| name == "notes.txt")
     ));
     assert!(matches!(
-        app.remote_edit
-            .as_ref()
-            .map(|edit| (edit.source, edit.phase)),
-        Some((EditSource::LeftRemote, RemoteEditPhase::Downloading))
+        app.file_edit.as_ref().map(|edit| (edit.source, edit.phase)),
+        Some((EditSource::LeftRemote, FileEditPhase::Downloading))
     ));
 }
 
@@ -163,14 +161,14 @@ fn switching_the_left_pane_waits_for_a_second_server_edit() {
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::LeftRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::Downloading,
+        phase: FileEditPhase::Downloading,
         editor_session: None,
     });
     let (tx, _rx) = std::sync::mpsc::channel::<crate::sftp::SftpCommand>();
@@ -182,10 +180,7 @@ fn switching_the_left_pane_waits_for_a_second_server_edit() {
         app.sftp_tx2.is_some(),
         "switching the left pane must wait for the edit transfer"
     );
-    assert!(
-        app.remote_edit.is_some(),
-        "the working copy must be retained"
-    );
+    assert!(app.file_edit.is_some(), "the working copy must be retained");
     assert!(app
         .sftp
         .as_ref()
@@ -204,14 +199,14 @@ fn switching_the_left_pane_waits_for_a_second_server_edit_retry() {
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::LeftRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::RetryingEditor,
+        phase: FileEditPhase::RetryingEditor,
         editor_session: None,
     });
     let (tx, _rx) = std::sync::mpsc::channel::<crate::sftp::SftpCommand>();
@@ -220,7 +215,7 @@ fn switching_the_left_pane_waits_for_a_second_server_edit_retry() {
     app.sftp_left_pane_to_local();
 
     assert!(app.sftp_tx2.is_some(), "retry-phase edits lock the pane");
-    assert!(app.remote_edit.is_some());
+    assert!(app.file_edit.is_some());
     assert!(app
         .sftp
         .as_ref()
@@ -235,20 +230,20 @@ fn local_edit_finish_clears_state_without_an_upload() {
     let mut app = test_app(vec![]);
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::Local,
-        remote_path: "/tmp/notes.txt".into(),
+        source_path: "/tmp/notes.txt".into(),
         local_path: "/tmp/notes.txt".into(),
         temp_dir: None,
         remote_mode: None,
         stamp: None,
-        phase: RemoteEditPhase::Editing,
+        phase: FileEditPhase::Editing,
         editor_session: None,
     });
 
     app.local_edit_finished();
 
-    assert!(app.remote_edit.is_none());
+    assert!(app.file_edit.is_none());
     assert!(app
         .sftp
         .as_ref()
@@ -264,14 +259,14 @@ fn disconnect_waits_for_an_active_edit_transfer() {
     app.sftp = Some(SftpState::new("/srv", "/tmp"));
     app.active_tab = 1;
     let temp_dir = tempfile::tempdir().unwrap();
-    app.remote_edit = Some(RemoteEditState {
+    app.file_edit = Some(FileEditState {
         source: EditSource::RightRemote,
-        remote_path: "/srv/notes.txt".into(),
+        source_path: "/srv/notes.txt".into(),
         local_path: temp_dir.path().join("notes.txt"),
         temp_dir: Some(temp_dir),
         remote_mode: Some(0o644),
         stamp: None,
-        phase: RemoteEditPhase::Downloading,
+        phase: FileEditPhase::Downloading,
         editor_session: None,
     });
 
@@ -281,10 +276,7 @@ fn disconnect_waits_for_an_active_edit_transfer() {
         app.sftp.is_some(),
         "the active transfer must not be detached"
     );
-    assert!(
-        app.remote_edit.is_some(),
-        "the working copy must be retained"
-    );
+    assert!(app.file_edit.is_some(), "the working copy must be retained");
     assert!(app
         .sftp
         .as_ref()

@@ -440,7 +440,7 @@ pub enum EditSource {
 /// source is remote) until the upload has either completed or the user
 /// abandons the edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemoteEditPhase {
+pub enum FileEditPhase {
     Downloading,
     RetryingDownload,
     Editing,
@@ -449,16 +449,18 @@ pub enum RemoteEditPhase {
     RetryingUpload,
 }
 
-pub struct RemoteEditState {
+pub struct FileEditState {
     pub source: EditSource,
-    pub remote_path: std::path::PathBuf,
+    /// Path on the origin pane: a remote SFTP path, or the local file itself
+    /// when `source` is [`EditSource::Local`].
+    pub source_path: std::path::PathBuf,
     pub local_path: std::path::PathBuf,
     /// Working copy for remote sources; `None` for plain local files, which
     /// are edited in place.
     pub temp_dir: Option<tempfile::TempDir>,
     pub remote_mode: Option<u32>,
     pub stamp: Option<crate::sftp::transport::RemoteFileStamp>,
-    pub phase: RemoteEditPhase,
+    pub phase: FileEditPhase,
     /// Index of the embedded local-editor session while it is alive.
     pub editor_session: Option<usize>,
 }

@@ -316,16 +316,14 @@ impl App {
     /// is edited in place. The worker owns both SFTP transfers so the UI never
     /// blocks.
     fn sftp_edit_selected(&mut self) {
-        if let Some(edit) = self.remote_edit.as_ref() {
+        if let Some(edit) = self.file_edit.as_ref() {
             match edit.phase {
-                RemoteEditPhase::RetryingDownload => self.remote_edit_start_download(),
-                RemoteEditPhase::RetryingEditor => {
+                FileEditPhase::RetryingDownload => self.remote_edit_start_download(),
+                FileEditPhase::RetryingEditor => {
                     let _ = self.start_local_editor();
                 }
-                RemoteEditPhase::RetryingUpload => self.remote_edit_start_upload(),
-                RemoteEditPhase::Downloading
-                | RemoteEditPhase::Editing
-                | RemoteEditPhase::Uploading => {
+                FileEditPhase::RetryingUpload => self.remote_edit_start_upload(),
+                FileEditPhase::Downloading | FileEditPhase::Editing | FileEditPhase::Uploading => {
                     if let Some(s) = self.sftp.as_mut() {
                         s.notice = Some("an edit is already in progress".into());
                     }
@@ -334,7 +332,7 @@ impl App {
             return;
         }
 
-        let Some((source, remote_path, name, remote_mode)) = self.sftp.as_ref().and_then(|s| {
+        let Some((source, source_path, name, remote_mode)) = self.sftp.as_ref().and_then(|s| {
             if s.phase == Phase::Running || s.connecting || s.left_connecting {
                 return None;
             }
@@ -384,14 +382,14 @@ impl App {
 
         // Plain local file: edit in place, no worker involved.
         if source == EditSource::Local {
-            self.remote_edit = Some(RemoteEditState {
+            self.file_edit = Some(FileEditState {
                 source,
-                remote_path: remote_path.clone(),
-                local_path: remote_path,
+                source_path: source_path.clone(),
+                local_path: source_path,
                 temp_dir: None,
                 remote_mode: None,
                 stamp: None,
-                phase: RemoteEditPhase::Editing,
+                phase: FileEditPhase::Editing,
                 editor_session: None,
             });
             let _ = self.start_local_editor();
@@ -419,7 +417,7 @@ impl App {
             .sftp_edit_channel(source)
             .map(|tx| {
                 tx.send(SftpCommand::EditDownload {
-                    remote: remote_path.clone(),
+                    remote: source_path.clone(),
                     local: local_path.clone(),
                 })
                 .is_ok()
@@ -432,14 +430,14 @@ impl App {
             return;
         }
 
-        self.remote_edit = Some(RemoteEditState {
+        self.file_edit = Some(FileEditState {
             source,
-            remote_path,
+            source_path,
             local_path,
             temp_dir: Some(temp_dir),
             remote_mode,
             stamp: None,
-            phase: RemoteEditPhase::Downloading,
+            phase: FileEditPhase::Downloading,
             editor_session: None,
         });
         if let Some(s) = self.sftp.as_mut() {
@@ -462,17 +460,17 @@ impl App {
     }
 
     fn remote_edit_start_download(&mut self) {
-        let Some((source, remote, local)) = self.remote_edit.as_ref().map(|edit| {
+        let Some((source, remote, local)) = self.file_edit.as_ref().map(|edit| {
             (
                 edit.source,
-                edit.remote_path.clone(),
+                edit.source_path.clone(),
                 edit.local_path.clone(),
             )
         }) else {
             return;
         };
-        if let Some(edit) = self.remote_edit.as_mut() {
-            edit.phase = RemoteEditPhase::Downloading;
+        if let Some(edit) = self.file_edit.as_mut() {
+            edit.phase = FileEditPhase::Downloading;
         }
         let sent = self
             .sftp_edit_channel(source)
@@ -491,12 +489,12 @@ impl App {
 
     pub(crate) fn remote_edit_start_upload(&mut self) {
         let Some((source, local, remote, expected, mode)) =
-            self.remote_edit.as_ref().and_then(|edit| {
+            self.file_edit.as_ref().and_then(|edit| {
                 edit.stamp.map(|stamp| {
                     (
                         edit.source,
                         edit.local_path.clone(),
-                        edit.remote_path.clone(),
+                        edit.source_path.clone(),
                         stamp,
                         edit.remote_mode,
                     )
@@ -505,8 +503,8 @@ impl App {
         else {
             return;
         };
-        if let Some(edit) = self.remote_edit.as_mut() {
-            edit.phase = RemoteEditPhase::Uploading;
+        if let Some(edit) = self.file_edit.as_mut() {
+            edit.phase = FileEditPhase::Uploading;
         }
         let sent = self
             .sftp_edit_channel(source)
@@ -532,14 +530,14 @@ impl App {
     }
 
     fn remote_edit_downloaded(&mut self, stamp: crate::sftp::transport::RemoteFileStamp) {
-        let Some(edit) = self.remote_edit.as_mut() else {
+        let Some(edit) = self.file_edit.as_mut() else {
             return;
         };
-        if edit.phase != RemoteEditPhase::Downloading {
+        if edit.phase != FileEditPhase::Downloading {
             return;
         }
         edit.stamp = Some(stamp);
-        edit.phase = RemoteEditPhase::Editing;
+        edit.phase = FileEditPhase::Editing;
         if let Some(s) = self.sftp.as_mut() {
             s.phase = Phase::Browsing;
             s.progress = None;
@@ -550,13 +548,13 @@ impl App {
 
     fn remote_edit_uploaded(&mut self, mode_warning: Option<String>) {
         if !self
-            .remote_edit
+            .file_edit
             .as_ref()
-            .is_some_and(|edit| edit.phase == RemoteEditPhase::Uploading)
+            .is_some_and(|edit| edit.phase == FileEditPhase::Uploading)
         {
             return;
         }
-        self.remote_edit = None;
+        self.file_edit = None;
         if let Some(s) = self.sftp.as_mut() {
             s.phase = Phase::Browsing;
             s.progress = None;
@@ -569,13 +567,13 @@ impl App {
     }
 
     pub(crate) fn remote_edit_error(&mut self, message: String) {
-        let Some(edit) = self.remote_edit.as_mut() else {
+        let Some(edit) = self.file_edit.as_mut() else {
             return;
         };
         edit.phase = match edit.phase {
-            RemoteEditPhase::Downloading => RemoteEditPhase::RetryingDownload,
-            RemoteEditPhase::Uploading | RemoteEditPhase::RetryingUpload => {
-                RemoteEditPhase::RetryingUpload
+            FileEditPhase::Downloading => FileEditPhase::RetryingDownload,
+            FileEditPhase::Uploading | FileEditPhase::RetryingUpload => {
+                FileEditPhase::RetryingUpload
             }
             phase => phase,
         };
@@ -1146,15 +1144,15 @@ impl App {
     /// flight: dropping `sftp_tx2` would strand the transfer, the working
     /// copy, or a retry that can never resolve.
     fn left_pane_edit_blocked(&self) -> Option<&'static str> {
-        let edit = self.remote_edit.as_ref()?;
+        let edit = self.file_edit.as_ref()?;
         if edit.source != EditSource::LeftRemote {
             return None;
         }
         match edit.phase {
-            RemoteEditPhase::Downloading | RemoteEditPhase::Uploading => {
+            FileEditPhase::Downloading | FileEditPhase::Uploading => {
                 Some("wait for the edit transfer to finish before switching the left pane")
             }
-            RemoteEditPhase::Editing if edit.editor_session.is_some() => {
+            FileEditPhase::Editing if edit.editor_session.is_some() => {
                 Some("finish the local editor before switching the left pane")
             }
             // Retry phases still own a working copy: once the pane switches,
@@ -1466,15 +1464,15 @@ impl App {
     /// Tear down the live session. Dropping the command `Sender` makes the
     /// worker thread self-terminate.
     fn sftp_disconnect(&mut self) {
-        if let Some(edit) = self.remote_edit.as_ref() {
+        if let Some(edit) = self.file_edit.as_ref() {
             // A local edit is independent of the SFTP workers: disconnecting
             // the browser neither strands nor discards it.
             if edit.source != EditSource::Local {
                 let message = match edit.phase {
-                    RemoteEditPhase::Downloading | RemoteEditPhase::Uploading => {
+                    FileEditPhase::Downloading | FileEditPhase::Uploading => {
                         Some("wait for the edit transfer to finish before disconnecting SFTP")
                     }
-                    RemoteEditPhase::Editing if edit.editor_session.is_some() => {
+                    FileEditPhase::Editing if edit.editor_session.is_some() => {
                         Some("finish the local editor before disconnecting SFTP")
                     }
                     _ => None,
@@ -1488,12 +1486,12 @@ impl App {
             }
         }
         if self
-            .remote_edit
+            .file_edit
             .as_ref()
             .is_some_and(|e| e.source != EditSource::Local)
         {
             self.host_notice = Some("remote edit discarded".into());
-            self.remote_edit = None;
+            self.file_edit = None;
         }
         // Mirror the way in (#35): a handshake that never completed carries the
         // "connecting…" layer off to the right, a live browser parts its panes
@@ -1551,7 +1549,7 @@ impl App {
             }
             SftpEvent::EditDownloaded(stamp)
                 if self
-                    .remote_edit
+                    .file_edit
                     .as_ref()
                     .is_some_and(|e| e.source == EditSource::LeftRemote) =>
             {
@@ -1559,7 +1557,7 @@ impl App {
             }
             SftpEvent::EditUploaded(warning)
                 if self
-                    .remote_edit
+                    .file_edit
                     .as_ref()
                     .is_some_and(|e| e.source == EditSource::LeftRemote) =>
             {
@@ -1567,7 +1565,7 @@ impl App {
             }
             SftpEvent::EditError(msg)
                 if self
-                    .remote_edit
+                    .file_edit
                     .as_ref()
                     .is_some_and(|e| e.source == EditSource::LeftRemote) =>
             {
@@ -1662,7 +1660,7 @@ impl App {
             }
             SftpEvent::EditDownloaded(stamp)
                 if self
-                    .remote_edit
+                    .file_edit
                     .as_ref()
                     .is_some_and(|e| e.source == EditSource::RightRemote) =>
             {
@@ -1670,7 +1668,7 @@ impl App {
             }
             SftpEvent::EditUploaded(warning)
                 if self
-                    .remote_edit
+                    .file_edit
                     .as_ref()
                     .is_some_and(|e| e.source == EditSource::RightRemote) =>
             {
@@ -1678,7 +1676,7 @@ impl App {
             }
             SftpEvent::EditError(msg)
                 if self
-                    .remote_edit
+                    .file_edit
                     .as_ref()
                     .is_some_and(|e| e.source == EditSource::RightRemote) =>
             {
